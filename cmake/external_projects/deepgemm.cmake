@@ -109,7 +109,7 @@ if(DEEPGEMM_ARCHS)
   # --------------------------
   # We vendor DeepGEMM into vllm/third_party/deep_gemm/ and bundle:
   #   - deep_gemm/_C.py (Python shim over torch.ops.deep_gemm)
-  #   - deep_gemm/_C_extension.abi3.so (single limited-API extension)
+  #   - deep_gemm/_C_extension.abi3.so (or .pyd on Windows; limited API)
   # The build is delegated to tools/build_deepgemm_C.py (setup.py build_ext).
   #
   # TODO: AOT-compile DeepGEMM's CUDA kernels instead of runtime JIT to drop
@@ -152,7 +152,8 @@ if(DEEPGEMM_ARCHS)
     COMPONENT _deep_gemm_C
     FILES_MATCHING
       PATTERN "_C.py"
-      PATTERN "_C_extension*.so")
+      PATTERN "_C_extension*.so"
+      PATTERN "_C*.pyd")
 
   #
   # Vendor DeepGEMM Python package files
