@@ -28,9 +28,14 @@ if(DEEPGEMM_SRC_DIR)
   message(STATUS "DeepGEMM using local DEEPGEMM_SRC_DIR: ${deepgemm_SOURCE_DIR}")
 else()
   # Keep in sync with tools/install_deepgemm.sh
-  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/deepseek-ai/DeepGEMM.git")
-  # Pinned to the tip of the nv_dev branch (SM120 support).
-  set(_DEEPGEMM_UPSTREAM_TAG "8b1392b978f5a03c828dd1711090d7fb50958b8a")
+  if(WIN32)
+    set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vortex-captain/DeepGEMM.git")
+    set(_DEEPGEMM_UPSTREAM_TAG "3d015cd1dc8464030da0d9da9fe0beccbe1ab201")
+  else()
+    set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/deepseek-ai/DeepGEMM.git")
+    # Pinned to the tip of the nv_dev branch (SM120 support).
+    set(_DEEPGEMM_UPSTREAM_TAG "8b1392b978f5a03c828dd1711090d7fb50958b8a")
+  endif()
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
@@ -56,6 +61,14 @@ else()
     )
   endif()
   message(STATUS "DeepGEMM is available at ${deepgemm_SOURCE_DIR}")
+endif()
+
+if(WIN32 AND EXISTS "${deepgemm_SOURCE_DIR}/scripts/apply_cutlass_patch.py")
+  execute_process(
+    COMMAND "${Python_EXECUTABLE}"
+            "${deepgemm_SOURCE_DIR}/scripts/apply_cutlass_patch.py"
+            "${deepgemm_SOURCE_DIR}/third-party/cutlass"
+    COMMAND_ERROR_IS_FATAL ANY)
 endif()
 
 # DeepGEMM requires CUDA 12.3+ for SM90, 12.9+ for SM100 (official upstream),

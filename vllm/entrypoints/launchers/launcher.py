@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import signal
 import socket
+import sys
 from collections.abc import Generator
 from functools import partial
 from typing import Any
@@ -213,7 +214,7 @@ def create_server_socket(
 
     sock = socket.socket(family=family, type=socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    if reuse_port:
+    if reuse_port and sys.platform != "win32":
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     sock.bind(addr)
 

@@ -10,6 +10,10 @@
 #include "attention_utils.cuh"
 #include "../../quantization/w8a8/fp8/common.cuh"
 
+namespace {
+using uint = unsigned int;
+}
+
 namespace vllm {
 
 // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
@@ -100,8 +104,8 @@ __global__ void merge_attn_states_kernel(
                            token_idx * prefix_lse_token_stride];
   float s_lse = suffix_lse[head_idx * suffix_lse_head_stride +
                            token_idx * suffix_lse_token_stride];
-  p_lse = std::isinf(p_lse) ? -std::numeric_limits<float>::infinity() : p_lse;
-  s_lse = std::isinf(s_lse) ? -std::numeric_limits<float>::infinity() : s_lse;
+  p_lse = ::isinf(p_lse) ? -std::numeric_limits<float>::infinity() : p_lse;
+  s_lse = ::isinf(s_lse) ? -std::numeric_limits<float>::infinity() : s_lse;
 
   const float max_lse = fmaxf(p_lse, s_lse);
 
@@ -113,7 +117,7 @@ __global__ void merge_attn_states_kernel(
      prefix_output (expected to be all zeros) and prefix_lse (-inf) to fix
      this problem.
   */
-  if (std::isinf(max_lse)) {
+  if (::isinf(max_lse)) {
     if (pack_offset < head_size) {
       input_pack_t p_out_pack = reinterpret_cast<const input_pack_t*>(
           prefix_head_ptr)[pack_offset / pack_size];

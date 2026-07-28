@@ -4,6 +4,7 @@
 import contextlib
 import os
 import threading
+import platform
 import weakref
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -1074,7 +1075,7 @@ def get_engine_zmq_addresses(
         client_local_only = False
 
     def _addr() -> str:
-        if client_local_only:
+        if client_local_only and platform.system() != "Windows":
             return get_open_zmq_ipc_path()
         return get_tcp_uri(host, 0 if defer_api_server_ports else get_open_port())
 
@@ -1199,15 +1200,19 @@ def launch_core_engines(
     if parallel_config.enable_elastic_ep:
         handshake_local_only = False
 
-    handshake_address = get_engine_client_zmq_addr(
-        handshake_local_only,
-        host,
-        parallel_config.data_parallel_rpc_port,
-    )
+    rpc_port = parallel_config.data_parallel_rpc_port or get_open_port()
+    if platform.system() == "Windows":
+        handshake_local_only = False
+    handshake_address = get_engine_client_zmq_addr(handshake_local_only, host, rpc_port)
 
     if local_engines_only and dp_rank > 0:
         assert not handshake_local_only
-        local_handshake_address = get_open_zmq_ipc_path()
+        if platform.system() == "Windows":
+            local_handshake_address = get_engine_client_zmq_addr(
+                handshake_local_only, host, get_open_port()
+            )
+        else:
+            local_handshake_address = get_open_zmq_ipc_path()
         client_handshake_address = local_handshake_address
     else:
         local_handshake_address = handshake_address
@@ -1269,23 +1274,35 @@ def wait_for_engine_startup(
     )
 
     # 1. Engine processes
-    if isinstance(launch.engine_manager, CoreEngineProcManager):
+    if (
+        isinstance(launch.engine_manager, CoreEngineProcManager)
+        and platform.system() != "Windows"
+    ):
         for sentinel in launch.engine_manager.sentinels():
             poller.register(sentinel, zmq.POLLIN)
     # 2. DP Coordinator process, if present
     coord_process = launch.coordinator.proc if launch.coordinator else None
-    if coord_process is not None:
+    if coord_process is not None and platform.system() != "Windows":
         poller.register(coord_process.sentinel, zmq.POLLIN)
     # 3. Watched frontend processes, if any
     frontend_process_by_fd: dict[int, FrontendProcess] = {}
     for proc in launch.watched_frontend_processes:
         fd = proc.sentinel if isinstance(proc.sentinel, int) else proc.sentinel.fileno()
         frontend_process_by_fd[fd] = proc
-        poller.register(fd, zmq.POLLIN)
+        if platform.system() != "Windows":
+            poller.register(fd, zmq.POLLIN)
 
     while any(conn_pending) or any(start_pending):
         events = poller.poll(STARTUP_POLL_PERIOD_MS)
-        if not events:
+        windows_process_exited = platform.system() == "Windows" and (
+            (
+                isinstance(launch.engine_manager, CoreEngineProcManager)
+                and bool(launch.engine_manager.finished_procs())
+            )
+            or (coord_process is not None and coord_process.exitcode is not None)
+            or any(p.exitcode is not None for p in frontend_process_by_fd.values())
+        )
+        if not events and not windows_process_exited:
             if any(conn_pending):
                 logger.debug(
                     "Waiting for %d local, %d remote core engine proc(s) to connect.",
@@ -1297,7 +1314,11 @@ def wait_for_engine_startup(
                     *start_pending,
                 )
             continue
-        if len(events) > 1 or events[0][0] != handshake_socket:
+        if (
+            windows_process_exited
+            or len(events) > 1
+            or events[0][0] != handshake_socket
+        ):
             # One of the local core, coordinator, or watched frontend processes exited.
             if isinstance(launch.engine_manager, CoreEngineProcManager):
                 finished = launch.engine_manager.finished_procs()

@@ -4,6 +4,7 @@ import asyncio
 import multiprocessing
 import multiprocessing.forkserver as forkserver
 import os
+import platform
 import signal
 import socket
 import tempfile
@@ -11,6 +12,14 @@ from argparse import Namespace
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
+
+if platform.system() == "Windows":
+    import winloop as uvloop_impl
+
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    os.environ["USE_LIBUV"] = os.environ.get("USE_LIBUV", "0")
+else:
+    import uvloop as uvloop_impl
 
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -202,8 +211,6 @@ async def run_server_worker(
 
 
 def main():
-    import uvloop
-
     from vllm.entrypoints.serve.utils.api_utils import cli_env_setup
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -223,7 +230,7 @@ def main():
     args = parser.parse_args()
     validate_parsed_serve_args(args)
 
-    uvloop.run(run_server(args))
+    uvloop_impl.run(run_server(args))
 
 
 if __name__ == "__main__":
