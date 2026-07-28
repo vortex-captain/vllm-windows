@@ -261,7 +261,7 @@ __device__ __forceinline__ void storeElemsFp8(
   }
   *reinterpret_cast<uint32_t*>(dst) = *reinterpret_cast<uint32_t const*>(out2);
 #else
-  float const kFp8Max = static_cast<float>(quant_type_max_v<RocmFp8T>);
+  float const kFp8Max = static_cast<float>(quant_type_max<RocmFp8T>::val());
   #pragma unroll
   for (int i = 0; i < kElemsPerLane; i++) {
     float vv = fminf(fmaxf(elems[i], -kFp8Max), kFp8Max);

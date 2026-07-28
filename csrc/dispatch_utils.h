@@ -127,10 +127,10 @@
 // Boolean dispatch
 #define VLLM_STABLE_DISPATCH_BOOL(expr, const_expr, ...) \
   if (expr) {                                            \
-    constexpr bool const_expr = true;                    \
+    static constexpr bool const_expr = true;                    \
     __VA_ARGS__();                                       \
   } else {                                               \
-    constexpr bool const_expr = false;                   \
+    static constexpr bool const_expr = false;                   \
     __VA_ARGS__();                                       \
   }
 
