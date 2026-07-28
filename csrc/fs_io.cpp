@@ -5,7 +5,13 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#ifdef _WIN32
+#include <io.h>
+#define access _access
+#define F_OK 0
+#else
 #include <unistd.h>
+#endif
 
 #include <filesystem>
 #include <string>
@@ -54,7 +60,7 @@ inline int _store_block(const char* tmp_path, const char* dest_path,
     return errno;
   }
 
-  const ssize_t written = write(fd, src, size);
+  const auto written = write(fd, src, size);
   if (written < 0 || static_cast<size_t>(written) != size) {
     const int err = written < 0 ? errno : EIO;
     close(fd);  // Best-effort cleanup; the real error is already captured.
@@ -92,7 +98,7 @@ inline int _load_block(const char* source_path, char* dst, size_t size,
     return errno;
   }
 
-  const ssize_t bytes_read = read(fd, dst, size);
+  const auto bytes_read = read(fd, dst, size);
   if (bytes_read < 0) {
     // Transient read error: leave the file untouched.
     const int err = errno;
