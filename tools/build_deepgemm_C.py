@@ -24,6 +24,8 @@ out = Path(sys.argv[2]).resolve()
 _pkg = src / "deep_gemm"
 out.mkdir(parents=True, exist_ok=True)
 
+is_windows = sys.platform == "win32"
+
 if not (_pkg / "_C.py").is_file():
     sys.exit(
         f"DeepGEMM source at {src} is missing deep_gemm/_C.py; "
@@ -45,10 +47,11 @@ subprocess.check_call(
 shim = _pkg / "_C.py"
 shutil.copy2(shim, out / shim.name)
 
-so = _pkg / "_C_extension.abi3.so"
-if not so.is_file():
-    sys.exit(f"DeepGEMM build did not produce {so}")
-for stale in out.glob("_C_extension*.so"):
+extension = _pkg / ("_C_extension.pyd" if is_windows else "_C_extension.abi3.so")
+if not extension.is_file():
+    sys.exit(f"DeepGEMM build did not produce {extension}")
+pattern = "_C_extension*.pyd" if is_windows else "_C_extension*.so"
+for stale in out.glob(pattern):
     stale.unlink()
-shutil.copy2(so, out / so.name)
-print(f"[build_deepgemm_C] installed {so.name} -> {out}", flush=True)
+shutil.copy2(extension, out / extension.name)
+print(f"[build_deepgemm_C] installed {extension.name} -> {out}", flush=True)
