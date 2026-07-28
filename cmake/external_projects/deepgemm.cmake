@@ -28,13 +28,18 @@ if(DEEPGEMM_SRC_DIR)
   message(STATUS "DeepGEMM using local DEEPGEMM_SRC_DIR: ${deepgemm_SOURCE_DIR}")
 else()
   # Keep in sync with tools/install_deepgemm.sh
-  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vllm-project/DeepGEMM.git")
-  # Pinned to the fork's dev branch: upstream 2.8.0 plus the SM120
-  # port, the SM90 paged-MQA kv_block=32/next_n=4 port, configurable SwiGLU
-  # alpha/beta, and SiTU for FP8/FP4 Mega MoE. Also includes the CUDA 12.x
-  # layout header fix from vllm-project/DeepGEMM#12.
-  # TORCH_LIBRARY build with a CPython 3.10 stable-ABI floor.
-  set(_DEEPGEMM_UPSTREAM_TAG "1e1842a833699298f7afc02eefb2ed168fff6938")
+  if(WIN32)
+    set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vortex-captain/DeepGEMM.git")
+    set(_DEEPGEMM_UPSTREAM_TAG "a2648c6cee3c69a2f1e8cbdfb51265461a14acbc")
+  else()
+    set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vllm-project/DeepGEMM.git")
+    # Pinned to the fork's dev branch: upstream 2.8.0 plus the SM120
+    # port, the SM90 paged-MQA kv_block=32/next_n=4 port, configurable SwiGLU
+    # alpha/beta, and SiTU for FP8/FP4 Mega MoE. Also includes the CUDA 12.x
+    # layout header fix from vllm-project/DeepGEMM#12.
+    # TORCH_LIBRARY build with a CPython 3.10 stable-ABI floor.
+    set(_DEEPGEMM_UPSTREAM_TAG "1e1842a833699298f7afc02eefb2ed168fff6938")
+  endif()
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
@@ -60,6 +65,14 @@ else()
     )
   endif()
   message(STATUS "DeepGEMM is available at ${deepgemm_SOURCE_DIR}")
+endif()
+
+if(WIN32 AND EXISTS "${deepgemm_SOURCE_DIR}/scripts/apply_cutlass_patch.py")
+  execute_process(
+    COMMAND "${Python_EXECUTABLE}"
+            "${deepgemm_SOURCE_DIR}/scripts/apply_cutlass_patch.py"
+            "${deepgemm_SOURCE_DIR}/third-party/cutlass"
+    COMMAND_ERROR_IS_FATAL ANY)
 endif()
 
 # DeepGEMM requires CUDA 12.3+ for SM90, 12.9+ for SM100 (official upstream),
