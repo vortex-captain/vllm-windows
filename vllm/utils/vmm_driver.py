@@ -225,7 +225,9 @@ class VmmDriver:
 
 class CudaVmmDriver(VmmDriver):
     dlpack_device_type = 2  # kDLCUDA
-    _lib_candidates = ("libcuda.so.1", "libcuda.so")
+    _lib_candidates = (
+        ("nvcuda.dll",) if os.name == "nt" else ("libcuda.so.1", "libcuda.so")
+    )
     _lib_search_name = "libcuda"
     _symbols = {
         "get_granularity": "cuMemGetAllocationGranularity",

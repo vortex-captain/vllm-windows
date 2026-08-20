@@ -27,6 +27,36 @@ def test_find_loaded_library_matches_the_file_name_not_a_substring():
     assert _find_loaded_library("libcuda", ["garbage"]) is None
 
 
+def test_cuda_driver_loads_platform_library(monkeypatch):
+    import ctypes
+    from unittest.mock import Mock, mock_open
+
+    from vllm.utils.vmm_driver import CudaVmmDriver
+
+    library_name = "nvcuda.dll" if sys.platform == "win32" else "libcuda.so.1"
+    library = Mock()
+    library.cuDeviceGetAttribute.return_value = 0
+
+    def get_granularity(output, prop, option):
+        ctypes.cast(output, ctypes.POINTER(ctypes.c_size_t))[0] = 65536
+        return 0
+
+    library.cuMemGetAllocationGranularity.side_effect = get_granularity
+    opened = []
+
+    def open_library(name):
+        opened.append(name)
+        if name != library_name:
+            raise OSError(name)
+        return library
+
+    monkeypatch.setattr("builtins.open", mock_open(read_data=""))
+    monkeypatch.setattr(ctypes, "CDLL", open_library)
+    driver = CudaVmmDriver()
+    assert driver.granularity(0) == 65536
+    assert opened == [library_name]
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available() or torch.version.hip is not None,
     reason="CUDA driver context handling",

@@ -227,7 +227,7 @@ _DLManagedTensor._fields_ = [
 _PyCapsule_New = ctypes.pythonapi.PyCapsule_New
 _PyCapsule_New.restype = ctypes.py_object
 _PyCapsule_New.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
-_malloc = ctypes.CDLL(None).malloc
+_malloc = ctypes.CDLL("ucrtbase.dll" if sys.platform == "win32" else None).malloc
 _malloc.restype = ctypes.c_void_p
 _malloc.argtypes = [ctypes.c_size_t]
 
