@@ -1,0 +1,1452 @@
+diff --git a/csrc/api/dense_decode.cpp b/csrc/api/dense_decode.cpp
+index 3449960..32bb1a9 100644
+--- a/csrc/api/dense_decode.cpp
++++ b/csrc/api/dense_decode.cpp
+@@ -145,7 +145,8 @@ dense_attn_decode_interface(
+     params.d = head_size_k;
+     params.d_v = head_size_v;
+     params.scale_softmax = softmax_scale;
+-    params.scale_softmax_log2 = float(softmax_scale * M_LOG2E);
++    constexpr double kLog2E = 1.4426950408889634074;
++    params.scale_softmax_log2 = float(softmax_scale * kLog2E);
+     // Set the pointers and strides.
+     params.q_ptr = q.data_ptr();
+     params.k_ptr = kcache.data_ptr();
+diff --git a/csrc/extension/sm90/dense_fp8/pybind.cpp b/csrc/extension/sm90/dense_fp8/pybind.cpp
+index a1a8830..2781c95 100644
+--- a/csrc/extension/sm90/dense_fp8/pybind.cpp
++++ b/csrc/extension/sm90/dense_fp8/pybind.cpp
+@@ -139,7 +139,8 @@ fwd_kvcache_mla_fp8(
+     params.d = head_size_k;
+     params.d_v = head_size_v;
+     params.scale_softmax = softmax_scale;
+-    params.scale_softmax_log2 = float(softmax_scale * M_LOG2E);
++    constexpr double kLog2E = 1.4426950408889634074;
++    params.scale_softmax_log2 = float(softmax_scale * kLog2E);
+     params.topk = -1; // Dense attention
+ 
+     // FP8-specific parameters
+diff --git a/csrc/extension/sm90/dense_fp8/softmax.h b/csrc/extension/sm90/dense_fp8/softmax.h
+index 1d6d553..48f55f6 100644
+--- a/csrc/extension/sm90/dense_fp8/softmax.h
++++ b/csrc/extension/sm90/dense_fp8/softmax.h
+@@ -72,8 +72,9 @@ __forceinline__ __device__ auto scale_apply_exp2(Tensor<Engine0, Layout0> &tenso
+     for (int mi = 0; mi < size<0>(tensor); ++mi) {
+         // If max is -inf, then all elements must have been -inf (possibly due to masking).
+         // We don't want (-inf - (-inf)) since that would give NaN.
+-        // If we don't have float around M_LOG2E the multiplication is done in fp64.
+-        const float max_scaled = max(mi) == -INFINITY ? 0.f : max(mi) * (Scale_max ? scale : float(M_LOG2E));
++        constexpr float kLog2E = 1.4426950408889634074f;
++        const float max_scaled =
++            max(mi) == -INFINITY ? 0.f : max(mi) * (Scale_max ? scale : kLog2E);
+         #pragma unroll
+         for (int ni = 0; ni < size<1>(tensor); ++ni)  {
+             // Instead of computing exp(x - max), we compute exp2(x * log_2(e) -
+diff --git a/csrc/kernels/sm100/decode/sparse/head64/config.h b/csrc/kernels/sm100/decode/sparse/head64/config.h
+index 23f480e..2bf56c3 100644
+--- a/csrc/kernels/sm100/decode/sparse/head64/config.h
++++ b/csrc/kernels/sm100/decode/sparse/head64/config.h
+@@ -90,7 +90,6 @@ struct TmaParams {
+     CUtensorMap tensor_map_extra_kv_quant_part;  // Same for `extra_kv` (fp8 or fp4). Invalid if extra_topk == 0
+     CUtensorMap tensor_map_extra_kv_bf16_part;
+ };
+-
+ // Tensor memory columns
+ struct tmem_cols {
+     //   0 ~ 256: output
+@@ -179,21 +178,62 @@ using SmemLayoutKTilesTransposed_SW64 = decltype(composition(
+     >{}
+ ));
+ 
++struct QoStorageModel1 {
++    array_aligned<bf16, cosize_v<SmemLayoutQ_SW128>> q;
++    union {
++        array_aligned<bf16, cosize_v<SmemLayoutOBuf>> o_buf;
++        array_aligned<float, cosize_v<SmemLayoutOAccumBuf>> o_accum_buf;
++    } o;
++};
++
++template<int Sw64Dim>
++struct QoStorageV32 {
++    static constexpr int D_Q_SW64 = Sw64Dim;
++    array_aligned<bf16, cosize_v<SmemLayoutQ_SW128>> q;
++    bf16 q_sw64[B_H*D_Q_SW64];
++    union {
++        array_aligned<bf16, cosize_v<SmemLayoutOBuf>> o_buf;
++        array_aligned<float, cosize_v<SmemLayoutOAccumBuf>> o_accum_buf;
++    } o;
++};
++
++using QoStorage = std::conditional_t<
++    D_Q_SW64 == 0,
++    QoStorageModel1,
++    QoStorageV32<D_Q_SW64>
++>;
++
++#ifdef _MSC_VER
++struct DequantStorageWithoutBf16 {
++    alignas(1024) bf16 quant_part[B_TOPK*D_FP8];
++};
++
++template<int Bf16Dim>
++struct DequantStorageWithBf16 {
++    static constexpr int D_BF16 = Bf16Dim;
++    alignas(1024) bf16 quant_part[B_TOPK*D_FP8];
++    alignas(1024) bf16 bf16_part[B_TOPK*D_BF16];
++};
++
++using DequantStorage = std::conditional_t<
++    D_BF16 != 0,
++    DequantStorageWithBf16<D_BF16>,
++    DequantStorageWithoutBf16
++>;
++#endif
++
+ struct SharedMemoryPlan {
+     union {
++        QoStorage qo;
+         struct {
+-            array_aligned<bf16, cosize_v<SmemLayoutQ_SW128>> q;
+-            bf16 q_sw64[B_H*D_Q_SW64];  // NOTE D_Q_SW64 may be 0 but array_aligned<bf16, 0> will have a size of 16, so we use array here. The former tensor (`q`) promises its alignment.
+-            union {
+-                array_aligned<bf16, cosize_v<SmemLayoutOBuf>> o_buf;
+-                array_aligned<float, cosize_v<SmemLayoutOAccumBuf>> o_accum_buf;
+-            } o;
+-        } qo;
+-        struct {
++#ifdef _MSC_VER
++            DequantStorage dequant[NUM_BUFS];
++#else
+             struct {
+                 alignas(1024) bf16 quant_part[B_TOPK*D_FP8];   // Quantized-origin (fp8 / fp4) part, dequantized to bf16
+                 alignas(1024) bf16 bf16_part[B_TOPK*D_BF16];   // bf16-origin part, swizzled as K_ROPE_SW
+             } dequant[NUM_BUFS];
++#endif
+             static_assert(sizeof(dequant) >= sizeof(bf16) * (B_H*D_Q)); // So that Q does not cover raw_quant
+             array_aligned<uint8_t, B_TOPK*D_FP8, 128> raw_quant[NUM_BUFS];  // Raw (quantized) rows of a KV block, RAW_TOKEN_SMEM_STRIDE<F> apart. For V41, includes both NoPE and RoPE. 128 B aligned for gather4
+             static_assert(B_TOPK * RAW_TOKEN_SMEM_STRIDE<ExtraKVFormat> <= B_TOPK * D_FP8);
+diff --git a/csrc/kernels/sm100/decode/sparse/head64/kernel.cuh b/csrc/kernels/sm100/decode/sparse/head64/kernel.cuh
+index 0e5b68d..ed91a00 100644
+--- a/csrc/kernels/sm100/decode/sparse/head64/kernel.cuh
++++ b/csrc/kernels/sm100/decode/sparse/head64/kernel.cuh
+@@ -346,7 +346,8 @@ KernelTemplate<CONFIG>
+                     int col_base = (i >= PV_GEMM_N/O_FOLD/B_EPI ? D_V/2 : 0) + (i*B_EPI%(PV_GEMM_N/O_FOLD));
+                     CUTE_UNROLL
+                     for (int j = 0; j < B_EPI / 8; ++j)
+-                        *(__int128_t*)(sO_bases[j] + col_base*B_H) = *(__int128_t*)(&o_bf16[j*4]);
++                        *reinterpret_cast<ku::int128_t*>(sO_bases[j] + col_base*B_H) =
++                            *reinterpret_cast<ku::int128_t*>(&o_bf16[j*4]);
+                     // Sync
+                     fence_view_async_shared();
+                     NamedBarrier::arrive_and_wait(128, NamedBarriers::wg0_sync);
+@@ -380,7 +381,9 @@ KernelTemplate<CONFIG>
+                     int col_base = (idx_in_warpgroup/B_H)*(PV_GEMM_N/O_FOLD) + (i >= PV_GEMM_N/O_FOLD/B_EPI ? D_V/2 : 0) + (i*B_EPI%(PV_GEMM_N/O_FOLD));
+                     CUTE_UNROLL
+                     for (int j = 0; j < B_EPI / 4; ++j)
+-                        *(__int128_t*)&sO(idx_in_warpgroup%B_H, col_base + j*4) = *(__int128_t*)(&o[j*2]);
++                        *reinterpret_cast<ku::int128_t*>(
++                            &sO(idx_in_warpgroup%B_H, col_base + j*4)) =
++                            *reinterpret_cast<ku::int128_t*>(&o[j*2]);
+                 }
+                 fence_view_async_shared();
+                 NamedBarrier::arrive_and_wait(128, NamedBarriers::wg0_sync);
+@@ -802,9 +805,21 @@ KernelTemplate<CONFIG>
+ #endif
+ }
+ 
++#ifdef _MSC_VER
++template<ModelType Model, ModelType ExtraModel, bool SplitKV,
++         typename Shape_Q_SW128, typename TMA_Q_SW128, typename Shape_O, typename TMA_O>
++__global__ void __launch_bounds__(
++    (KernelTemplate<Config{Model, ExtraModel, SplitKV}>::NUM_THREADS), 1, 1)
++flash_fwd_splitkv_mla_fp8_sparse_kernel(
++    __grid_constant__ const SparseAttnDecodeParams params,
++    __grid_constant__ const typename KernelTemplate<Config{Model, ExtraModel, SplitKV}>::template TmaParams<
++        Shape_Q_SW128, TMA_Q_SW128, Shape_O, TMA_O> tma_params) {
++    using Kernel = KernelTemplate<Config{Model, ExtraModel, SplitKV}>;
++#else
+ template<typename Kernel, typename TmaParams>
+ __global__ void __launch_bounds__(Kernel::NUM_THREADS, 1, 1)
+ flash_fwd_splitkv_mla_fp8_sparse_kernel(__grid_constant__ const SparseAttnDecodeParams params, __grid_constant__ const TmaParams tma_params ) {
++#endif
+     Kernel::flash_fwd_splitkv_mla_fp8_sparse_kernel_devfunc(params, tma_params );
+ }
+ 
+@@ -887,7 +902,14 @@ void KernelTemplate<CONFIG>::run(const SparseAttnDecodeParams &params) {
+         tensor_map_extra_kv_quant_part,
+         tensor_map_extra_kv_bf16_part
+     };
++#ifdef _MSC_VER
++    auto mla_kernel = &flash_fwd_splitkv_mla_fp8_sparse_kernel<
++        CONFIG.MODEL_TYPE, CONFIG.EXTRA_MODEL_TYPE, CONFIG.ENABLE_SPLITKV,
++        decltype(shape_Q_SW128), decltype(tma_Q_SW128),
++        decltype(shape_O), decltype(tma_O)>;
++#else
+     auto mla_kernel = &flash_fwd_splitkv_mla_fp8_sparse_kernel<KernelTemplate<CONFIG>, decltype(tma_params)>;
++#endif
+ 
+     constexpr size_t smem_size = sizeof(SharedMemoryPlan);
+     static_assert(smem_size <= 227*1024);
+diff --git a/csrc/kernels/sm100/decode/sparse/nvfp4_head64/kernel.cuh b/csrc/kernels/sm100/decode/sparse/nvfp4_head64/kernel.cuh
+index af8b1af..c8a2737 100644
+--- a/csrc/kernels/sm100/decode/sparse/nvfp4_head64/kernel.cuh
++++ b/csrc/kernels/sm100/decode/sparse/nvfp4_head64/kernel.cuh
+@@ -368,7 +368,8 @@ KernelTemplate<MODEL_TYPE>
+                     int col_base = (i*B_EPI>=D_V/4 ? D_V/2 : 0) + (i*B_EPI%(D_V/4));
+                     CUTE_UNROLL
+                     for (int j = 0; j < B_EPI / 8; ++j)
+-                        *(__int128_t*)(sO_bases[j] + col_base*B_H) = *(__int128_t*)(&o_bf16[j*4]);
++                        *reinterpret_cast<ku::int128_t*>(sO_bases[j] + col_base*B_H) =
++                            *reinterpret_cast<ku::int128_t*>(&o_bf16[j*4]);
+                     // Sync
+                     fence_view_async_shared();
+                     NamedBarrier::arrive_and_wait(128, NamedBarriers::wg0_sync);
+@@ -408,7 +409,8 @@ KernelTemplate<MODEL_TYPE>
+                     int col_base = (idx_in_warpgroup/64)*128 + (i*B_EPI >= D_V/4 ? D_V/2 : 0) + (i*B_EPI%(D_V/4));
+                     CUTE_UNROLL
+                     for (int j = 0; j < B_EPI / 4; ++j)
+-                        *(__int128_t*)&sO(idx_in_warpgroup%64, col_base + j*4) = *(__int128_t*)(&o[j*2]);
++                        *reinterpret_cast<ku::int128_t*>(&sO(idx_in_warpgroup%64, col_base + j*4)) =
++                            *reinterpret_cast<ku::int128_t*>(&o[j*2]);
+                 }
+                 fence_view_async_shared();
+                 NamedBarrier::arrive_and_wait(128, NamedBarriers::wg0_sync);
+@@ -755,7 +757,8 @@ KernelTemplate<MODEL_TYPE>
+                     } else if constexpr (MODEL_TYPE == ModelType::V32) {
+                         *(uint64_t*)(plan.scales[rs.index_buf_idx] + lane_idx*2) = *(uint64_t*)scales;
+                     } else {
+-                        *(__int128_t*)(plan.scales[rs.index_buf_idx] + lane_idx*2) = *(__int128_t*)scales;
++                        *reinterpret_cast<ku::int128_t*>(plan.scales[rs.index_buf_idx] + lane_idx*2) =
++                            *reinterpret_cast<ku::int128_t*>(scales);
+                     }
+                     *(int2*)(plan.tma_coord[rs.index_buf_idx] + lane_idx*2) = *(int2*)tma_coords;
+                     if (lane_idx%4 == 0)
+@@ -822,7 +825,8 @@ KernelTemplate<MODEL_TYPE>
+                             CUTE_UNROLL
+                             for (int i = 0; i < 4; ++i)
+                                 out[i] = fp8x2_to_bf16x2(d[i]);
+-                            *(__int128_t*)&sRope(half*B_TOPK + token, j*8) = *(__int128_t*)out;
++                            *reinterpret_cast<ku::int128_t*>(&sRope(half*B_TOPK + token, j*8)) =
++                                *reinterpret_cast<ku::int128_t*>(out);
+                         }
+                         cutlass::arch::fence_view_async_shared();
+                         plan.bar_rope_ready[rs.buf_idx].arrive();
+@@ -833,11 +837,19 @@ KernelTemplate<MODEL_TYPE>
+                     {
+                         uint32_t cur_nope_base_uint_addr = cute::cast_smem_ptr_to_uint(rs.buf_idx == 0 ? nope0_base : nope1_base);
+                         const uint8_t* raw_nope_base = rs.buf_idx == 0 ? raw_nope0_base : raw_nope1_base;
+-                        auto st_128b = [&](int local_row_idx, int local_col_idx, __int128_t &data) {
++                        auto st_128b = [&](int local_row_idx, int local_col_idx, ku::int128_t &data) {
++#ifdef _MSC_VER
++                            asm volatile ("st.weak.shared::cta.v4.b32 [%0], {%1, %2, %3, %4};\n"
++                                :
++                                : "r"(cur_nope_base_uint_addr + 2*(local_row_idx*NUM_GROUPS*64 + local_col_idx*B_TOPK*64)),
++                                  "r"(data.x), "r"(data.y), "r"(data.z), "r"(data.w)
++                            );
++#else
+                             asm volatile ("st.weak.shared::cta.b128 [%0], %1;\n"
+                                 :
+                                 : "r"(cur_nope_base_uint_addr + 2*(local_row_idx*NUM_GROUPS*64 + local_col_idx*B_TOPK*64)), "q"(data)   // 2 for sizeof(bf16)
+                             );
++#endif
+                         };
+                         CUTE_UNROLL
+                         for (int local_row_idx = 0; local_row_idx < ROWS_PER_GROUP; ++local_row_idx) {
+@@ -873,7 +885,7 @@ KernelTemplate<MODEL_TYPE>
+                                 CUTE_UNROLL
+                                 for (int i = 0; i < 4; ++i)
+                                     out[i] = __hmul2(out[i], sf2);
+-                                st_128b(local_row_idx, local_col_idx, *(__int128_t*)out);
++                                st_128b(local_row_idx, local_col_idx, *reinterpret_cast<ku::int128_t*>(out));
+                             }
+                         }
+                     }
+@@ -890,11 +902,20 @@ KernelTemplate<MODEL_TYPE>
+                 plan.bar_sv_done[rs.buf_idx].wait(rs.bar_phase^1);
+                 uint32_t cur_nope_base_uint_addr = cute::cast_smem_ptr_to_uint(rs.buf_idx == 0 ? nope0_base : nope1_base);
+                 const uint8_t* raw_nope_base = rs.buf_idx == 0 ? raw_nope0_base : raw_nope1_base;
+-                auto st_128b = [&](int local_row_idx, int local_col_idx, __int128_t &data) {
++                auto st_128b = [&](int local_row_idx, int local_col_idx, ku::int128_t &data) {
++#ifdef _MSC_VER
++                    asm volatile ("st.weak.shared::cta.v4.b32 [%0], {%1, %2, %3, %4};\n"
++                        :
++                        : "r"(cur_nope_base_uint_addr + 2*(local_row_idx*NUM_GROUPS*64 + local_col_idx*B_TOPK*64)),
++                          "r"(data.x), "r"(data.y), "r"(data.z), "r"(data.w)
++                    );
++#else
+                     asm volatile ("st.weak.shared::cta.b128 [%0], %1;\n"
+                         :
+                         : "r"(cur_nope_base_uint_addr + 2*(local_row_idx*NUM_GROUPS*64 + local_col_idx*B_TOPK*64)), "q"(data)   // 2 for sizeof(bf16)
+-                    );  // We have this `asm volatile` here, otherwise the compiler generates ST.E instead of STS
++                    );
++#endif
++                    // Keep explicit shared assembly to generate STS rather than ST.E.
+                 };
+                 auto get_raw_fp8 = [&](int local_row_idx, int local_col_idx) -> uint64_t {
+                     return *(const uint64_t*)(raw_nope_base + local_row_idx*NUM_GROUPS*NOPE_RAW_BYTES + local_col_idx*(GROUP_SIZE*8));
+@@ -923,7 +944,7 @@ KernelTemplate<MODEL_TYPE>
+                             for (int i = 0; i < 4; ++i) {
+                                 data_bf16[i] = fp8x2_to_bf16x2_with_scale(data_fp8[i], *(ku::nvbf16*)(&scale));
+                             }
+-                            st_128b(local_row_idx, local_col_idx, *(__int128_t*)data_bf16);
++                            st_128b(local_row_idx, local_col_idx, *reinterpret_cast<ku::int128_t*>(data_bf16));
+                         }
+                     }
+                 } else {
+@@ -951,7 +972,7 @@ KernelTemplate<MODEL_TYPE>
+                             for (int i = 0; i < 4; ++i) {
+                                 data_bf16[i] = fp8x2_to_bf16x2_with_scale(data_fp8[i], *(ku::nvbf16*)(&scale));
+                             }
+-                            st_128b(local_row_idx, local_col_idx, *(__int128_t*)data_bf16);
++                            st_128b(local_row_idx, local_col_idx, *reinterpret_cast<ku::int128_t*>(data_bf16));
+                         }
+                     }
+                 }
+diff --git a/csrc/kernels/sm100/dequant_utils.cuh b/csrc/kernels/sm100/dequant_utils.cuh
+index 709989a..10eb08a 100644
+--- a/csrc/kernels/sm100/dequant_utils.cuh
++++ b/csrc/kernels/sm100/dequant_utils.cuh
+@@ -62,7 +62,8 @@ CUTE_DEVICE void copy_bytes(uint8_t *dst, const uint8_t *src) {
+     } else {
+         CUTE_UNROLL
+         for (int i = 0; i < NUM_BYTES / 16; ++i) {
+-            *((__int128_t*)dst + i) = *((const __int128_t*)src + i);
++            *(reinterpret_cast<ku::int128_t*>(dst) + i) =
++                *(reinterpret_cast<const ku::int128_t*>(src) + i);
+         }
+     }
+ }
+@@ -151,10 +152,19 @@ struct KVBlockDequantizer {
+                 if (local_row_idx == 0 && local_col_idx == 0) {
+                     before_first_store();
+                 }
++#ifdef _MSC_VER
++                auto& packed_bf16 = *reinterpret_cast<ku::int128_t*>(data_bf16);
++                asm volatile ("st.weak.shared::cta.v4.b32 [%0], {%1, %2, %3, %4};\n"
++                    :
++                    : "r"(dst + dst_offset + local_row_idx * NUM_GROUPS * 128 + local_col_idx * B_TOPK * 128),
++                      "r"(packed_bf16.x), "r"(packed_bf16.y), "r"(packed_bf16.z), "r"(packed_bf16.w)
++                );
++#else
+                 asm volatile ("st.weak.shared::cta.b128 [%0], %1;\n"
+                     :
+                     : "r"(dst + dst_offset + local_row_idx * NUM_GROUPS * 128 + local_col_idx * B_TOPK * 128), "q"(*(__int128_t*)data_bf16)
+                 );
++#endif
+             }
+         }
+     }
+diff --git a/csrc/kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/config.h b/csrc/kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/config.h
+index 22e265e..9ff0fb3 100644
+--- a/csrc/kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/config.h
++++ b/csrc/kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/config.h
+@@ -208,6 +208,345 @@ using TiledMMA_SV = cute::conditional_t<
+     decltype(make_tiled_mma(SM100_MMA_F16BF16_WS_SS_NOELECT<bf16, bf16, float, H_Q, 256, UMMA::Major::K, UMMA::Major::MN>{}))
+ >;
+ 
++#ifdef _MSC_VER
++struct PrefillWithoutNormWithoutPEmptyBarrierStorage {
++    CUTE_ALIGNAS(1024) bf16 kv_slots[NUM_KV_SLOTS][B_TOPK * D_QK / CLUSTER_SIZE];    // Cluster size = 1: the whole KV; cluster size = 2: half KV
++    CUTE_ALIGNAS(1024) bf16 s[H_Q_PER_CTA * B_TOPK];
++    CUTE_ALIGNAS(1024) float p_exchange_buf[4][32*NUM_P_ELEMS_PER_THREAD];
++    CUTE_ALIGNAS(1024) uint8_t is_k_valid[NUM_INDICES_BUFS][ku::find_next_power_of_2(B_TOPK/8)];
++    float rowwise_max_buf[128];
++    float rowwise_mi_buf[H_Q_PER_CTA];
++    float rowwise_li_buf[128];    // 128: warpgroup size
++
++    transac_bar_t bar_kv_slot_full[NUM_KV_SLOTS], bar_kv_slot_empty[NUM_KV_SLOTS];
++    transac_bar_t bar_indices_full[NUM_INDICES_BUFS], bar_indices_empty[NUM_INDICES_BUFS];
++    transac_bar_t bar_tQ_empty, bar_tQ_full;
++    transac_bar_t bar_q_sqr_sum_full;   // Only used for 2-CTA
++    transac_bar_t bar_tO_empty, bar_tO_full;
++    transac_bar_t bar_tP_full[NUM_P_BUFS];
++    transac_bar_t bar_SO_full, bar_SO_empty;
++    transac_bar_t bar_clc_full, bar_clc_empty;
++    transac_bar_t bar_li_mi_full, bar_li_mi_empty;
++    transac_bar_t bar_raw_kv_full;
++
++    ku::CLCResponseObj clc_response_obj;
++    array_aligned<uint32_t, 1> tmem_start_addr;
++};
++
++struct PrefillWithoutNormWithPEmptyBarrierStorage {
++    CUTE_ALIGNAS(1024) bf16 kv_slots[NUM_KV_SLOTS][B_TOPK * D_QK / CLUSTER_SIZE];    // Cluster size = 1: the whole KV; cluster size = 2: half KV
++    CUTE_ALIGNAS(1024) bf16 s[H_Q_PER_CTA * B_TOPK];
++    CUTE_ALIGNAS(1024) float p_exchange_buf[4][32*NUM_P_ELEMS_PER_THREAD];
++    CUTE_ALIGNAS(1024) uint8_t is_k_valid[NUM_INDICES_BUFS][ku::find_next_power_of_2(B_TOPK/8)];
++    float rowwise_max_buf[128];
++    float rowwise_mi_buf[H_Q_PER_CTA];
++    float rowwise_li_buf[128];    // 128: warpgroup size
++
++    transac_bar_t bar_kv_slot_full[NUM_KV_SLOTS], bar_kv_slot_empty[NUM_KV_SLOTS];
++    transac_bar_t bar_indices_full[NUM_INDICES_BUFS], bar_indices_empty[NUM_INDICES_BUFS];
++    transac_bar_t bar_tQ_empty, bar_tQ_full;
++    transac_bar_t bar_q_sqr_sum_full;   // Only used for 2-CTA
++    transac_bar_t bar_tO_empty, bar_tO_full;
++    transac_bar_t bar_tP_full[NUM_P_BUFS], bar_tP_empty[NUM_P_BUFS];
++    transac_bar_t bar_SO_full, bar_SO_empty;
++    transac_bar_t bar_clc_full, bar_clc_empty;
++    transac_bar_t bar_li_mi_full, bar_li_mi_empty;
++    transac_bar_t bar_raw_kv_full;
++
++    ku::CLCResponseObj clc_response_obj;
++    array_aligned<uint32_t, 1> tmem_start_addr;
++};
++
++struct PrefillWithNormWithoutPEmptyBarrierStorage {
++    CUTE_ALIGNAS(1024) bf16 kv_slots[NUM_KV_SLOTS][B_TOPK * D_QK / CLUSTER_SIZE];    // Cluster size = 1: the whole KV; cluster size = 2: half KV
++    CUTE_ALIGNAS(1024) bf16 s[H_Q_PER_CTA * B_TOPK];
++    CUTE_ALIGNAS(1024) float p_exchange_buf[4][32*NUM_P_ELEMS_PER_THREAD];
++    CUTE_ALIGNAS(1024) uint8_t is_k_valid[NUM_INDICES_BUFS][ku::find_next_power_of_2(B_TOPK/8)];
++    float q_sqr_sum_buf[2][128];    // We have 2 q_sqr_sum_buf to save some barriers, as Q[i+2] starts to fetch -> O[i] have finished -> Q[i]'s q_sqr_sum_buf is useless
++    float rowwise_max_buf[128];
++    float rowwise_mi_buf[H_Q_PER_CTA];
++    float rowwise_li_buf[128];    // 128: warpgroup size
++
++    transac_bar_t bar_kv_slot_full[NUM_KV_SLOTS], bar_kv_slot_empty[NUM_KV_SLOTS];
++    transac_bar_t bar_indices_full[NUM_INDICES_BUFS], bar_indices_empty[NUM_INDICES_BUFS];
++    transac_bar_t bar_tQ_empty, bar_tQ_full;
++    transac_bar_t bar_q_sqr_sum_full;   // Only used for 2-CTA
++    transac_bar_t bar_tO_empty, bar_tO_full;
++    transac_bar_t bar_tP_full[NUM_P_BUFS];
++    transac_bar_t bar_SO_full, bar_SO_empty;
++    transac_bar_t bar_clc_full, bar_clc_empty;
++    transac_bar_t bar_li_mi_full, bar_li_mi_empty;
++    transac_bar_t bar_raw_kv_full;
++
++    ku::CLCResponseObj clc_response_obj;
++    array_aligned<uint32_t, 1> tmem_start_addr;
++};
++
++struct PrefillWithNormWithPEmptyBarrierStorage {
++    CUTE_ALIGNAS(1024) bf16 kv_slots[NUM_KV_SLOTS][B_TOPK * D_QK / CLUSTER_SIZE];    // Cluster size = 1: the whole KV; cluster size = 2: half KV
++    CUTE_ALIGNAS(1024) bf16 s[H_Q_PER_CTA * B_TOPK];
++    CUTE_ALIGNAS(1024) float p_exchange_buf[4][32*NUM_P_ELEMS_PER_THREAD];
++    CUTE_ALIGNAS(1024) uint8_t is_k_valid[NUM_INDICES_BUFS][ku::find_next_power_of_2(B_TOPK/8)];
++    float q_sqr_sum_buf[2][128];    // We have 2 q_sqr_sum_buf to save some barriers, as Q[i+2] starts to fetch -> O[i] have finished -> Q[i]'s q_sqr_sum_buf is useless
++    float rowwise_max_buf[128];
++    float rowwise_mi_buf[H_Q_PER_CTA];
++    float rowwise_li_buf[128];    // 128: warpgroup size
++
++    transac_bar_t bar_kv_slot_full[NUM_KV_SLOTS], bar_kv_slot_empty[NUM_KV_SLOTS];
++    transac_bar_t bar_indices_full[NUM_INDICES_BUFS], bar_indices_empty[NUM_INDICES_BUFS];
++    transac_bar_t bar_tQ_empty, bar_tQ_full;
++    transac_bar_t bar_q_sqr_sum_full;   // Only used for 2-CTA
++    transac_bar_t bar_tO_empty, bar_tO_full;
++    transac_bar_t bar_tP_full[NUM_P_BUFS], bar_tP_empty[NUM_P_BUFS];
++    transac_bar_t bar_SO_full, bar_SO_empty;
++    transac_bar_t bar_clc_full, bar_clc_empty;
++    transac_bar_t bar_li_mi_full, bar_li_mi_empty;
++    transac_bar_t bar_raw_kv_full;
++
++    ku::CLCResponseObj clc_response_obj;
++    array_aligned<uint32_t, 1> tmem_start_addr;
++};
++
++struct DecodeFp8WithoutNormWithoutPEmptyBarrierStorage {
++    CUTE_ALIGNAS(1024) bf16 kv_slots[NUM_KV_SLOTS][B_TOPK * D_QK / CLUSTER_SIZE];    // Cluster size = 1: the whole KV; cluster size = 2: half KV
++    CUTE_ALIGNAS(1024) bf16 s[H_Q_PER_CTA * B_TOPK];
++    CUTE_ALIGNAS(1024) float p_exchange_buf[4][32*NUM_P_ELEMS_PER_THREAD];
++    CUTE_ALIGNAS(1024) uint8_t is_k_valid[NUM_INDICES_BUFS][ku::find_next_power_of_2(B_TOPK/8)];
++    CUTE_ALIGNAS(16) int decode_tma_coords[NUM_INDICES_BUFS][B_TOPK];
++    uint8_t decode_scales[NUM_INDICES_BUFS][B_TOPK * NUM_SCALES_EACH_TOKEN_PER_CTA];   // Scales of the fp8 tokens
++    float rowwise_max_buf[128];
++    float rowwise_mi_buf[H_Q_PER_CTA];
++    float rowwise_li_buf[128];    // 128: warpgroup size
++
++    transac_bar_t bar_kv_slot_full[NUM_KV_SLOTS], bar_kv_slot_empty[NUM_KV_SLOTS];
++    transac_bar_t bar_indices_full[NUM_INDICES_BUFS], bar_indices_empty[NUM_INDICES_BUFS];
++    transac_bar_t bar_tQ_empty, bar_tQ_full;
++    transac_bar_t bar_q_sqr_sum_full;   // Only used for 2-CTA
++    transac_bar_t bar_tO_empty, bar_tO_full;
++    transac_bar_t bar_tP_full[NUM_P_BUFS];
++    transac_bar_t bar_SO_full, bar_SO_empty;
++    transac_bar_t bar_clc_full, bar_clc_empty;
++    transac_bar_t bar_li_mi_full, bar_li_mi_empty;
++    transac_bar_t bar_raw_kv_full;
++
++    ku::CLCResponseObj clc_response_obj;
++    array_aligned<uint32_t, 1> tmem_start_addr;
++};
++
++struct DecodeFp8WithoutNormWithPEmptyBarrierStorage {
++    CUTE_ALIGNAS(1024) bf16 kv_slots[NUM_KV_SLOTS][B_TOPK * D_QK / CLUSTER_SIZE];    // Cluster size = 1: the whole KV; cluster size = 2: half KV
++    CUTE_ALIGNAS(1024) bf16 s[H_Q_PER_CTA * B_TOPK];
++    CUTE_ALIGNAS(1024) float p_exchange_buf[4][32*NUM_P_ELEMS_PER_THREAD];
++    CUTE_ALIGNAS(1024) uint8_t is_k_valid[NUM_INDICES_BUFS][ku::find_next_power_of_2(B_TOPK/8)];
++    CUTE_ALIGNAS(16) int decode_tma_coords[NUM_INDICES_BUFS][B_TOPK];
++    uint8_t decode_scales[NUM_INDICES_BUFS][B_TOPK * NUM_SCALES_EACH_TOKEN_PER_CTA];   // Scales of the fp8 tokens
++    float rowwise_max_buf[128];
++    float rowwise_mi_buf[H_Q_PER_CTA];
++    float rowwise_li_buf[128];    // 128: warpgroup size
++
++    transac_bar_t bar_kv_slot_full[NUM_KV_SLOTS], bar_kv_slot_empty[NUM_KV_SLOTS];
++    transac_bar_t bar_indices_full[NUM_INDICES_BUFS], bar_indices_empty[NUM_INDICES_BUFS];
++    transac_bar_t bar_tQ_empty, bar_tQ_full;
++    transac_bar_t bar_q_sqr_sum_full;   // Only used for 2-CTA
++    transac_bar_t bar_tO_empty, bar_tO_full;
++    transac_bar_t bar_tP_full[NUM_P_BUFS], bar_tP_empty[NUM_P_BUFS];
++    transac_bar_t bar_SO_full, bar_SO_empty;
++    transac_bar_t bar_clc_full, bar_clc_empty;
++    transac_bar_t bar_li_mi_full, bar_li_mi_empty;
++    transac_bar_t bar_raw_kv_full;
++
++    ku::CLCResponseObj clc_response_obj;
++    array_aligned<uint32_t, 1> tmem_start_addr;
++};
++
++struct DecodeFp8WithNormWithoutPEmptyBarrierStorage {
++    CUTE_ALIGNAS(1024) bf16 kv_slots[NUM_KV_SLOTS][B_TOPK * D_QK / CLUSTER_SIZE];    // Cluster size = 1: the whole KV; cluster size = 2: half KV
++    CUTE_ALIGNAS(1024) bf16 s[H_Q_PER_CTA * B_TOPK];
++    CUTE_ALIGNAS(1024) float p_exchange_buf[4][32*NUM_P_ELEMS_PER_THREAD];
++    CUTE_ALIGNAS(1024) uint8_t is_k_valid[NUM_INDICES_BUFS][ku::find_next_power_of_2(B_TOPK/8)];
++    CUTE_ALIGNAS(16) int decode_tma_coords[NUM_INDICES_BUFS][B_TOPK];
++    uint8_t decode_scales[NUM_INDICES_BUFS][B_TOPK * NUM_SCALES_EACH_TOKEN_PER_CTA];   // Scales of the fp8 tokens
++    float q_sqr_sum_buf[2][128];    // We have 2 q_sqr_sum_buf to save some barriers, as Q[i+2] starts to fetch -> O[i] have finished -> Q[i]'s q_sqr_sum_buf is useless
++    float rowwise_max_buf[128];
++    float rowwise_mi_buf[H_Q_PER_CTA];
++    float rowwise_li_buf[128];    // 128: warpgroup size
++
++    transac_bar_t bar_kv_slot_full[NUM_KV_SLOTS], bar_kv_slot_empty[NUM_KV_SLOTS];
++    transac_bar_t bar_indices_full[NUM_INDICES_BUFS], bar_indices_empty[NUM_INDICES_BUFS];
++    transac_bar_t bar_tQ_empty, bar_tQ_full;
++    transac_bar_t bar_q_sqr_sum_full;   // Only used for 2-CTA
++    transac_bar_t bar_tO_empty, bar_tO_full;
++    transac_bar_t bar_tP_full[NUM_P_BUFS];
++    transac_bar_t bar_SO_full, bar_SO_empty;
++    transac_bar_t bar_clc_full, bar_clc_empty;
++    transac_bar_t bar_li_mi_full, bar_li_mi_empty;
++    transac_bar_t bar_raw_kv_full;
++
++    ku::CLCResponseObj clc_response_obj;
++    array_aligned<uint32_t, 1> tmem_start_addr;
++};
++
++struct DecodeFp8WithNormWithPEmptyBarrierStorage {
++    CUTE_ALIGNAS(1024) bf16 kv_slots[NUM_KV_SLOTS][B_TOPK * D_QK / CLUSTER_SIZE];    // Cluster size = 1: the whole KV; cluster size = 2: half KV
++    CUTE_ALIGNAS(1024) bf16 s[H_Q_PER_CTA * B_TOPK];
++    CUTE_ALIGNAS(1024) float p_exchange_buf[4][32*NUM_P_ELEMS_PER_THREAD];
++    CUTE_ALIGNAS(1024) uint8_t is_k_valid[NUM_INDICES_BUFS][ku::find_next_power_of_2(B_TOPK/8)];
++    CUTE_ALIGNAS(16) int decode_tma_coords[NUM_INDICES_BUFS][B_TOPK];
++    uint8_t decode_scales[NUM_INDICES_BUFS][B_TOPK * NUM_SCALES_EACH_TOKEN_PER_CTA];   // Scales of the fp8 tokens
++    float q_sqr_sum_buf[2][128];    // We have 2 q_sqr_sum_buf to save some barriers, as Q[i+2] starts to fetch -> O[i] have finished -> Q[i]'s q_sqr_sum_buf is useless
++    float rowwise_max_buf[128];
++    float rowwise_mi_buf[H_Q_PER_CTA];
++    float rowwise_li_buf[128];    // 128: warpgroup size
++
++    transac_bar_t bar_kv_slot_full[NUM_KV_SLOTS], bar_kv_slot_empty[NUM_KV_SLOTS];
++    transac_bar_t bar_indices_full[NUM_INDICES_BUFS], bar_indices_empty[NUM_INDICES_BUFS];
++    transac_bar_t bar_tQ_empty, bar_tQ_full;
++    transac_bar_t bar_q_sqr_sum_full;   // Only used for 2-CTA
++    transac_bar_t bar_tO_empty, bar_tO_full;
++    transac_bar_t bar_tP_full[NUM_P_BUFS], bar_tP_empty[NUM_P_BUFS];
++    transac_bar_t bar_SO_full, bar_SO_empty;
++    transac_bar_t bar_clc_full, bar_clc_empty;
++    transac_bar_t bar_li_mi_full, bar_li_mi_empty;
++    transac_bar_t bar_raw_kv_full;
++
++    ku::CLCResponseObj clc_response_obj;
++    array_aligned<uint32_t, 1> tmem_start_addr;
++};
++
++struct DecodeFp4WithoutNormWithoutPEmptyBarrierStorage {
++    CUTE_ALIGNAS(1024) bf16 kv_slots[NUM_KV_SLOTS][B_TOPK * D_QK / CLUSTER_SIZE];    // Cluster size = 1: the whole KV; cluster size = 2: half KV
++    CUTE_ALIGNAS(1024) bf16 s[H_Q_PER_CTA * B_TOPK];
++    CUTE_ALIGNAS(1024) float p_exchange_buf[4][32*NUM_P_ELEMS_PER_THREAD];
++    CUTE_ALIGNAS(1024) uint8_t is_k_valid[NUM_INDICES_BUFS][ku::find_next_power_of_2(B_TOPK/8)];
++    CUTE_ALIGNAS(16) int decode_tma_coords[NUM_INDICES_BUFS][B_TOPK];
++    uint8_t decode_scales[NUM_INDICES_BUFS][B_TOPK * NUM_SCALES_EACH_TOKEN_PER_CTA];   // Scales of the fp8 tokens
++    const uint8_t *decode_scale_ptrs[NUM_INDICES_BUFS][B_TOPK];
++    float rowwise_max_buf[128];
++    float rowwise_mi_buf[H_Q_PER_CTA];
++    float rowwise_li_buf[128];    // 128: warpgroup size
++
++    transac_bar_t bar_kv_slot_full[NUM_KV_SLOTS], bar_kv_slot_empty[NUM_KV_SLOTS];
++    transac_bar_t bar_indices_full[NUM_INDICES_BUFS], bar_indices_empty[NUM_INDICES_BUFS];
++    transac_bar_t bar_tQ_empty, bar_tQ_full;
++    transac_bar_t bar_q_sqr_sum_full;   // Only used for 2-CTA
++    transac_bar_t bar_tO_empty, bar_tO_full;
++    transac_bar_t bar_tP_full[NUM_P_BUFS];
++    transac_bar_t bar_SO_full, bar_SO_empty;
++    transac_bar_t bar_clc_full, bar_clc_empty;
++    transac_bar_t bar_li_mi_full, bar_li_mi_empty;
++    transac_bar_t bar_raw_kv_full;
++
++    ku::CLCResponseObj clc_response_obj;
++    array_aligned<uint32_t, 1> tmem_start_addr;
++};
++
++struct DecodeFp4WithoutNormWithPEmptyBarrierStorage {
++    CUTE_ALIGNAS(1024) bf16 kv_slots[NUM_KV_SLOTS][B_TOPK * D_QK / CLUSTER_SIZE];    // Cluster size = 1: the whole KV; cluster size = 2: half KV
++    CUTE_ALIGNAS(1024) bf16 s[H_Q_PER_CTA * B_TOPK];
++    CUTE_ALIGNAS(1024) float p_exchange_buf[4][32*NUM_P_ELEMS_PER_THREAD];
++    CUTE_ALIGNAS(1024) uint8_t is_k_valid[NUM_INDICES_BUFS][ku::find_next_power_of_2(B_TOPK/8)];
++    CUTE_ALIGNAS(16) int decode_tma_coords[NUM_INDICES_BUFS][B_TOPK];
++    uint8_t decode_scales[NUM_INDICES_BUFS][B_TOPK * NUM_SCALES_EACH_TOKEN_PER_CTA];   // Scales of the fp8 tokens
++    const uint8_t *decode_scale_ptrs[NUM_INDICES_BUFS][B_TOPK];
++    float rowwise_max_buf[128];
++    float rowwise_mi_buf[H_Q_PER_CTA];
++    float rowwise_li_buf[128];    // 128: warpgroup size
++
++    transac_bar_t bar_kv_slot_full[NUM_KV_SLOTS], bar_kv_slot_empty[NUM_KV_SLOTS];
++    transac_bar_t bar_indices_full[NUM_INDICES_BUFS], bar_indices_empty[NUM_INDICES_BUFS];
++    transac_bar_t bar_tQ_empty, bar_tQ_full;
++    transac_bar_t bar_q_sqr_sum_full;   // Only used for 2-CTA
++    transac_bar_t bar_tO_empty, bar_tO_full;
++    transac_bar_t bar_tP_full[NUM_P_BUFS], bar_tP_empty[NUM_P_BUFS];
++    transac_bar_t bar_SO_full, bar_SO_empty;
++    transac_bar_t bar_clc_full, bar_clc_empty;
++    transac_bar_t bar_li_mi_full, bar_li_mi_empty;
++    transac_bar_t bar_raw_kv_full;
++
++    ku::CLCResponseObj clc_response_obj;
++    array_aligned<uint32_t, 1> tmem_start_addr;
++};
++
++struct DecodeFp4WithNormWithoutPEmptyBarrierStorage {
++    CUTE_ALIGNAS(1024) bf16 kv_slots[NUM_KV_SLOTS][B_TOPK * D_QK / CLUSTER_SIZE];    // Cluster size = 1: the whole KV; cluster size = 2: half KV
++    CUTE_ALIGNAS(1024) bf16 s[H_Q_PER_CTA * B_TOPK];
++    CUTE_ALIGNAS(1024) float p_exchange_buf[4][32*NUM_P_ELEMS_PER_THREAD];
++    CUTE_ALIGNAS(1024) uint8_t is_k_valid[NUM_INDICES_BUFS][ku::find_next_power_of_2(B_TOPK/8)];
++    CUTE_ALIGNAS(16) int decode_tma_coords[NUM_INDICES_BUFS][B_TOPK];
++    uint8_t decode_scales[NUM_INDICES_BUFS][B_TOPK * NUM_SCALES_EACH_TOKEN_PER_CTA];   // Scales of the fp8 tokens
++    const uint8_t *decode_scale_ptrs[NUM_INDICES_BUFS][B_TOPK];
++    float q_sqr_sum_buf[2][128];    // We have 2 q_sqr_sum_buf to save some barriers, as Q[i+2] starts to fetch -> O[i] have finished -> Q[i]'s q_sqr_sum_buf is useless
++    float rowwise_max_buf[128];
++    float rowwise_mi_buf[H_Q_PER_CTA];
++    float rowwise_li_buf[128];    // 128: warpgroup size
++
++    transac_bar_t bar_kv_slot_full[NUM_KV_SLOTS], bar_kv_slot_empty[NUM_KV_SLOTS];
++    transac_bar_t bar_indices_full[NUM_INDICES_BUFS], bar_indices_empty[NUM_INDICES_BUFS];
++    transac_bar_t bar_tQ_empty, bar_tQ_full;
++    transac_bar_t bar_q_sqr_sum_full;   // Only used for 2-CTA
++    transac_bar_t bar_tO_empty, bar_tO_full;
++    transac_bar_t bar_tP_full[NUM_P_BUFS];
++    transac_bar_t bar_SO_full, bar_SO_empty;
++    transac_bar_t bar_clc_full, bar_clc_empty;
++    transac_bar_t bar_li_mi_full, bar_li_mi_empty;
++    transac_bar_t bar_raw_kv_full;
++
++    ku::CLCResponseObj clc_response_obj;
++    array_aligned<uint32_t, 1> tmem_start_addr;
++};
++
++struct DecodeFp4WithNormWithPEmptyBarrierStorage {
++    CUTE_ALIGNAS(1024) bf16 kv_slots[NUM_KV_SLOTS][B_TOPK * D_QK / CLUSTER_SIZE];    // Cluster size = 1: the whole KV; cluster size = 2: half KV
++    CUTE_ALIGNAS(1024) bf16 s[H_Q_PER_CTA * B_TOPK];
++    CUTE_ALIGNAS(1024) float p_exchange_buf[4][32*NUM_P_ELEMS_PER_THREAD];
++    CUTE_ALIGNAS(1024) uint8_t is_k_valid[NUM_INDICES_BUFS][ku::find_next_power_of_2(B_TOPK/8)];
++    CUTE_ALIGNAS(16) int decode_tma_coords[NUM_INDICES_BUFS][B_TOPK];
++    uint8_t decode_scales[NUM_INDICES_BUFS][B_TOPK * NUM_SCALES_EACH_TOKEN_PER_CTA];   // Scales of the fp8 tokens
++    const uint8_t *decode_scale_ptrs[NUM_INDICES_BUFS][B_TOPK];
++    float q_sqr_sum_buf[2][128];    // We have 2 q_sqr_sum_buf to save some barriers, as Q[i+2] starts to fetch -> O[i] have finished -> Q[i]'s q_sqr_sum_buf is useless
++    float rowwise_max_buf[128];
++    float rowwise_mi_buf[H_Q_PER_CTA];
++    float rowwise_li_buf[128];    // 128: warpgroup size
++
++    transac_bar_t bar_kv_slot_full[NUM_KV_SLOTS], bar_kv_slot_empty[NUM_KV_SLOTS];
++    transac_bar_t bar_indices_full[NUM_INDICES_BUFS], bar_indices_empty[NUM_INDICES_BUFS];
++    transac_bar_t bar_tQ_empty, bar_tQ_full;
++    transac_bar_t bar_q_sqr_sum_full;   // Only used for 2-CTA
++    transac_bar_t bar_tO_empty, bar_tO_full;
++    transac_bar_t bar_tP_full[NUM_P_BUFS], bar_tP_empty[NUM_P_BUFS];
++    transac_bar_t bar_SO_full, bar_SO_empty;
++    transac_bar_t bar_clc_full, bar_clc_empty;
++    transac_bar_t bar_li_mi_full, bar_li_mi_empty;
++    transac_bar_t bar_raw_kv_full;
++
++    ku::CLCResponseObj clc_response_obj;
++    array_aligned<uint32_t, 1> tmem_start_addr;
++};
++
++using PrefillStorage = std::conditional_t<
++    ENABLE_Q_NORM,
++    std::conditional_t<NEED_TP_EMPTY_BAR, PrefillWithNormWithPEmptyBarrierStorage, PrefillWithNormWithoutPEmptyBarrierStorage>,
++    std::conditional_t<NEED_TP_EMPTY_BAR, PrefillWithoutNormWithPEmptyBarrierStorage, PrefillWithoutNormWithoutPEmptyBarrierStorage>
++>;
++
++using DecodeFp8Storage = std::conditional_t<
++    ENABLE_Q_NORM,
++    std::conditional_t<NEED_TP_EMPTY_BAR, DecodeFp8WithNormWithPEmptyBarrierStorage, DecodeFp8WithNormWithoutPEmptyBarrierStorage>,
++    std::conditional_t<NEED_TP_EMPTY_BAR, DecodeFp8WithoutNormWithPEmptyBarrierStorage, DecodeFp8WithoutNormWithoutPEmptyBarrierStorage>
++>;
++
++using DecodeFp4Storage = std::conditional_t<
++    ENABLE_Q_NORM,
++    std::conditional_t<NEED_TP_EMPTY_BAR, DecodeFp4WithNormWithPEmptyBarrierStorage, DecodeFp4WithNormWithoutPEmptyBarrierStorage>,
++    std::conditional_t<NEED_TP_EMPTY_BAR, DecodeFp4WithoutNormWithPEmptyBarrierStorage, DecodeFp4WithoutNormWithoutPEmptyBarrierStorage>
++>;
++
++using SharedMemoryPlan = std::conditional_t<
++    IS_DECODE,
++    std::conditional_t<HAS_FP4_KV, DecodeFp4Storage, DecodeFp8Storage>,
++    PrefillStorage
++>;
++#else
+ struct SharedMemoryPlan {
+     CUTE_ALIGNAS(1024) bf16 kv_slots[NUM_KV_SLOTS][B_TOPK * D_QK / CLUSTER_SIZE];    // Cluster size = 1: the whole KV; cluster size = 2: half KV
+     CUTE_ALIGNAS(1024) bf16 s[H_Q_PER_CTA * B_TOPK];
+@@ -239,6 +578,7 @@ struct SharedMemoryPlan {
+     ku::CLCResponseObj clc_response_obj;
+     array_aligned<uint32_t, 1> tmem_start_addr;
+ };
++#endif
+ static_assert(sizeof(SharedMemoryPlan) <= 227 * 1024);
+ 
+ struct TMAParams {
+diff --git a/csrc/kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/kernel.cuh b/csrc/kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/kernel.cuh
+index 11534ef..a722724 100644
+--- a/csrc/kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/kernel.cuh
++++ b/csrc/kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/core_attn/kernel.cuh
+@@ -602,7 +602,7 @@ void Kernel<CONFIG>::devfunc(const Params &params, const TMAParams &tma_params,
+                 smem.bar_SO_empty.wait(rs.get<1>().second^1);
+                 CUTE_UNROLL
+                 for (int i = 0; i < NUM_ELEMS_PER_THREAD/8; ++i) {
+-                    ku::st_shared(sS_base + i*8*H_Q_PER_CTA, *(__int128_t*)(s + i*8));
++                    ku::st_shared(sS_base + i*8*H_Q_PER_CTA, *reinterpret_cast<ku::int128_t*>(s + i*8));
+                 }
+ 
+                 // Rescale O
+@@ -868,15 +868,26 @@ void Kernel<CONFIG>::devfunc(const Params &params, const TMAParams &tma_params,
+                                     *(uint64_t*)scale_dst = is_index_valid ? scales : 0;
+                                 } else {
+                                     static_assert(NUM_SCALES_EACH_TOKEN_PER_CTA == 16);
+-                                    __int128_t scales;
++                                    ku::int128_t scales;
++#ifdef _MSC_VER
++                                    asm volatile (
++                                        "ld.global.nc.L1::no_allocate.v4.b32 {%0, %1, %2, %3}, [%4];"
++                                        : "=r"(scales.x), "=r"(scales.y), "=r"(scales.z), "=r"(scales.w)
++                                        : "l"((uint64_t)scale_ptr)
++                                    );
++#else
+                                     asm volatile (
+                                         "ld.global.nc.L1::no_allocate.b128 %0, [%1];"
+                                         : "=q"(scales)
+                                         : "l"((uint64_t)scale_ptr)
+                                     );
+-                                    *(__int128_t*)scale_dst = is_index_valid ? scales : 0;
++#endif
++                                    *reinterpret_cast<ku::int128_t*>(scale_dst) = is_index_valid ? scales : ku::int128_t{};
+                                 }
+-                            } else {
++                            } else if constexpr (HAS_FP4_KV) {
++                                // smem has decode_scale_ptrs only when IS_DECODE and
++                                // HAS_FP4_KV are both true; here IS_DECODE is true,
++                                // and constexpr (HAS_FP4_KV) guard is needed.
+                                 smem.decode_scale_ptrs[indices_buf_idx][row] = is_index_valid ? scale_ptr : nullptr;
+                             }
+                             uint32_t mask = __ballot_sync(0xFFFFFFFF, is_index_valid);
+@@ -1092,7 +1103,7 @@ void Kernel<CONFIG>::devfunc(const Params &params, const TMAParams &tma_params,
+                             uint8_t *row_base = slot_base + get_raw_row_offset(row) + row % 4 * F::RAW_TOKEN_SMEM_STRIDE;
+                             CUTE_UNROLL
+                             for (uint32_t g = 0; g < F::NUM_CHUNKS_PER_ROW / NUM_LANES_PER_ROW; ++g) {
+-                                *(__int128_t*)(cached_input[token_idx][g]) = ku::ld_shared(
++                                *reinterpret_cast<ku::int128_t*>(cached_input[token_idx][g]) = ku::ld_shared(
+                                     row_base + get_chunk_base.template operator()<F>(g / 4) * 16 + g % 4 * 16
+                                 );
+                             }
+@@ -1135,7 +1146,7 @@ void Kernel<CONFIG>::devfunc(const Params &params, const TMAParams &tma_params,
+                                 for (uint32_t j = 0; j < NUM_STS_PER_CHUNK; ++j) {
+                                     ku::st_shared(
+                                         slot_base + sts_offsets[g % CHUNKS_PER_ATOM_ROW * NUM_STS_PER_CHUNK + j] + atom_col * STS_ATOM_COL_STRIDE_BYTES + token_idx * STS_TOKEN_STRIDE_BYTES,
+-                                        *(__int128_t*)(data_bf16x2 + j * 4)
++                                        *reinterpret_cast<ku::int128_t*>(data_bf16x2 + j * 4)
+                                     );
+                                 }
+                             }
+@@ -1252,7 +1263,7 @@ void Kernel<CONFIG>::devfunc(const Params &params, const TMAParams &tma_params,
+                                 *(uint64_t*)cached_scales[local_row_idx] = *(uint64_t*)scale_src;
+                             } else {
+                                 static_assert(NUM_SCALED_EACH_TOKEN_LOCAL == 16);
+-                                *(__int128_t*)cached_scales[local_row_idx] = *(__int128_t*)scale_src;
++                                *reinterpret_cast<ku::int128_t*>(cached_scales[local_row_idx]) = *reinterpret_cast<ku::int128_t*>(scale_src);
+                             }
+                         }
+                         smem.bar_indices_empty[indices_buf_idx].arrive();
+@@ -1339,7 +1350,7 @@ void Kernel<CONFIG>::devfunc(const Params &params, const TMAParams &tma_params,
+                                     // Skip the last K/V block for V4
+                                     continue;
+                                 }
+-                                *(__int128_t*)(cached_input[local_row_idx][local_col_idx]) = ku::ld_shared(
++                                *reinterpret_cast<ku::int128_t*>(cached_input[local_row_idx][local_col_idx]) = ku::ld_shared(
+                                     (fp8_e4m3*)smem.kv_slots[kv_slot_idx] + 
+                                     row*d_fp8_this_cta_padded + 
+                                     local_col_idx*GROUP_SIZE*16 + 
+@@ -1359,7 +1370,7 @@ void Kernel<CONFIG>::devfunc(const Params &params, const TMAParams &tma_params,
+                                 }
+                                 ku::nve4m3x2 data_fp8x2[8];
+                                 ku::nvbf16x2 data_bf16x2[8];
+-                                *(__int128_t*)data_fp8x2 = *(__int128_t*)(cached_input[local_row_idx][local_col_idx]);
++                                *reinterpret_cast<ku::int128_t*>(data_fp8x2) = *reinterpret_cast<ku::int128_t*>(cached_input[local_row_idx][local_col_idx]);
+                                 static_assert(KV_QUANT_TILE_SIZE == 64 || KV_QUANT_TILE_SIZE == 32);
+                                 uint32_t scale_idx = KV_QUANT_TILE_SIZE == 64 ? local_col_idx : local_col_idx*2 + (idx_in_group >= GROUP_SIZE/2);
+                                 CUTE_UNROLL
+@@ -1368,11 +1379,11 @@ void Kernel<CONFIG>::devfunc(const Params &params, const TMAParams &tma_params,
+                                 }
+                                 ku::st_shared(
+                                     smem.kv_slots[kv_slot_idx] + sts_base_offset_0 + local_row_idx*(NUM_DEQUANT_WARPS*NUM_ROWS_PER_WARP*64) + local_col_idx*(B_TOPK*GROUP_SIZE*16),
+-                                    *(__int128_t*)(data_bf16x2 + 0)
++                                    *reinterpret_cast<ku::int128_t*>(data_bf16x2 + 0)
+                                 );
+                                 ku::st_shared(
+                                     smem.kv_slots[kv_slot_idx] + sts_base_offset_1 + local_row_idx*(NUM_DEQUANT_WARPS*NUM_ROWS_PER_WARP*64) + local_col_idx*(B_TOPK*GROUP_SIZE*16),
+-                                    *(__int128_t*)(data_bf16x2 + 4)
++                                    *reinterpret_cast<ku::int128_t*>(data_bf16x2 + 4)
+                                 );
+                             }
+                         }
+@@ -1459,11 +1470,24 @@ void Kernel<CONFIG>::devfunc(const Params &params, const TMAParams &tma_params,
+ }
+ 
+ 
++#ifdef _MSC_VER
++template<SparseAttnFwdMode Mode, ModelType Model, ModelType ExtraModel, uint32_t Heads, bool Norm>
++__global__ void __launch_bounds__(
++    (Kernel<Config{Mode, Model, ExtraModel, Heads, Norm}>::NUM_THREADS), 1,
++    (Kernel<Config{Mode, Model, ExtraModel, Heads, Norm}>::CLUSTER_SIZE))
++fwd_kernel(
++    __grid_constant__ const typename Kernel<Config{Mode, Model, ExtraModel, Heads, Norm}>::Params params,
++    __grid_constant__ const typename Kernel<Config{Mode, Model, ExtraModel, Heads, Norm}>::TMAParams tma_params,
++    __grid_constant__ const typename Kernel<Config{Mode, Model, ExtraModel, Heads, Norm}>::AuxParams aux_params) {
++    Kernel<Config{Mode, Model, ExtraModel, Heads, Norm}>::devfunc(params, tma_params, aux_params);
++}
++#else
+ template<typename Kernel>
+ __global__ void __launch_bounds__(Kernel::NUM_THREADS, 1, Kernel::CLUSTER_SIZE)
+ fwd_kernel(__grid_constant__ const typename Kernel::Params params, __grid_constant__ const typename Kernel::TMAParams tma_params, __grid_constant__ const typename Kernel::AuxParams aux_params) {
+     Kernel::devfunc(params, tma_params, aux_params);
+ }
++#endif
+ 
+ 
+ template<Config CONFIG>
+@@ -1595,7 +1619,11 @@ void Kernel<CONFIG>::run(const Params &params) {
+         aux_params.fast_divmod_extra_page_block_size = cutlass::FastDivmod(params.extra_kv != nullptr ? params.extra_page_block_size : 1);
+     }
+ 
++#ifdef _MSC_VER
++    auto kernel = &fwd_kernel<CONFIG.FWD_MODE, CONFIG.MODEL_TYPE, CONFIG.EXTRA_MODEL_TYPE, CONFIG.H_Q, CONFIG.ENABLE_Q_NORM>;
++#else
+     auto kernel = &fwd_kernel<Kernel>;
++#endif
+     constexpr size_t smem_size = sizeof(SharedMemoryPlan);
+     KU_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+ 
+diff --git a/csrc/kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/permute_wv_proj/kernel.cu b/csrc/kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/permute_wv_proj/kernel.cu
+index beed958..9164fa6 100644
+--- a/csrc/kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/permute_wv_proj/kernel.cu
++++ b/csrc/kernels/sm100/prefill/sparse/fused_norm_rope_attn_rope_cast_fwd/permute_wv_proj/kernel.cu
+@@ -73,13 +73,13 @@ __global__ void permute_wv_proj_kernel(__grid_constant__ const Params params) {
+     bar.wait(0);
+     for (uint32_t i = threadIdx.x; i < params.wv_group_size * (D_O / CHUNK_SIZE); i += 32) {
+         fp8_e4m3 data[CHUNK_SIZE];
+-        *(__int128_t*)(data +  0) = ku::ld_shared(row_buf + i * CHUNK_SIZE);
+-        *(__int128_t*)(data + 16) = ku::ld_shared(row_buf + i * CHUNK_SIZE + 16);
++        *reinterpret_cast<ku::int128_t*>(data +  0) = ku::ld_shared(row_buf + i * CHUNK_SIZE);
++        *reinterpret_cast<ku::int128_t*>(data + 16) = ku::ld_shared(row_buf + i * CHUNK_SIZE + 16);
+         uint32_t head_idx = i / (D_O / CHUNK_SIZE);
+         uint32_t head_dim_chunk_idx = i % (D_O / CHUNK_SIZE);
+         uint32_t chunk_idx_in_permuted_row = head_dim_chunk_idx * params.wv_group_size + head_idx;
+-        ku::st_shared(permuted_row_buf + chunk_idx_in_permuted_row * CHUNK_SIZE +  0, *(__int128_t*)(data +  0));
+-        ku::st_shared(permuted_row_buf + chunk_idx_in_permuted_row * CHUNK_SIZE + 16, *(__int128_t*)(data + 16));
++        ku::st_shared(permuted_row_buf + chunk_idx_in_permuted_row * CHUNK_SIZE +  0, *reinterpret_cast<ku::int128_t*>(data +  0));
++        ku::st_shared(permuted_row_buf + chunk_idx_in_permuted_row * CHUNK_SIZE + 16, *reinterpret_cast<ku::int128_t*>(data + 16));
+     }
+ 
+     // Store the row
+diff --git a/csrc/kernels/sm100/prefill/sparse/fwd/head128/phase1.cuh b/csrc/kernels/sm100/prefill/sparse/fwd/head128/phase1.cuh
+index 72d15dd..92a2bd2 100644
+--- a/csrc/kernels/sm100/prefill/sparse/fwd/head128/phase1.cuh
++++ b/csrc/kernels/sm100/prefill/sparse/fwd/head128/phase1.cuh
+@@ -649,7 +649,7 @@ void run_sparse_fwd_phase1_kernel(const SparseAttnFwdParams& params) {
+                 make_stride(params.stride_q_h_q, _1{}, params.stride_q_s_q)
+             )
+         ),
+-        (typename Kernel::SmemLayoutQTiles<D_QK/64>){}
++        typename Kernel::template SmemLayoutQTiles<D_QK/64>{}
+     );
+ 
+     auto shape_O = make_shape(params.h_q, params.d_v, params.s_q);
+@@ -662,7 +662,7 @@ void run_sparse_fwd_phase1_kernel(const SparseAttnFwdParams& params) {
+                 make_stride(params.d_v, _1{}, params.h_q*params.d_v)
+             )
+         ),
+-        (typename Kernel::SmemLayoutOTiles<1>){}
++        typename Kernel::template SmemLayoutOTiles<1>{}
+     );
+ 
+     CUtensorMap tensor_map_kv;
+diff --git a/csrc/kernels/sm100/prefill/sparse/fwd/head64/config.h b/csrc/kernels/sm100/prefill/sparse/fwd/head64/config.h
+index 6199af0..14b793d 100644
+--- a/csrc/kernels/sm100/prefill/sparse/fwd/head64/config.h
++++ b/csrc/kernels/sm100/prefill/sparse/fwd/head64/config.h
+@@ -118,6 +118,63 @@ using SmemLayoutS = decltype(coalesce(tile_to_shape(
+ 	Step<_1, _2>{}
+ ), Shape<_1, _1>{}));
+ 
++#ifdef _MSC_VER
++struct SharedMemoryPlanWithoutRope {
++    union {
++        static_assert(B_H <= B_TOPK);
++        array_aligned<bf16, B_TOPK*D_V> qko_slots[NUM_BUFS];
++    } u;
++    float p_exchange_buf[4][32 * (B_TOPK/(128/B_H))];
++    bf16 s[B_H*B_TOPK];
++    char is_k_valid[NUM_BUFS][B_TOPK/8];
++    transac_bar_t bar_prologue_q_nope, bar_prologue_q_rope, bar_prologue_utccp_nope, bar_prologue_utccp_rope;
++    transac_bar_t bar_qk_nope_done[NUM_BUFS], bar_qk_rope_done;    // Pi = QKi^T (the nope part) done
++    transac_bar_t bar_sv_done[NUM_BUFS];    // O += SiVi done (i.e. O, Si and Vi are free)
++    transac_bar_t bar_kv_nope_ready[NUM_BUFS][2], bar_kv_rope_ready;
++    transac_bar_t bar_p_free;
++    transac_bar_t bar_so_ready;   // S and O are ready
++    transac_bar_t bar_o_write_back_done;
++    transac_bar_t bar_o_write_back_done_waited; // Whether the barrier above has been waited for. Used to prevent double arrive
++    transac_bar_t bar_k_valid_ready[NUM_BUFS], bar_k_valid_free[NUM_BUFS];
++    transac_bar_t bar_clc_full, bar_clc_empty;
++    array_aligned<uint32_t, 1> tmem_start_addr;
++    float rowwise_max_buf[128], rowwise_li_buf[128];
++    ku::CLCResponseObj clc_response_obj;
++};
++
++template<int QueryDim, int ValueDim>
++struct SharedMemoryPlanWithRope {
++    static constexpr int D_Q = QueryDim;
++    static constexpr int D_V = ValueDim;
++    union {
++        static_assert(B_H <= B_TOPK);
++        array_aligned<bf16, B_TOPK*D_V> qko_slots[NUM_BUFS];
++    } u;
++    bf16 qk_rope_slot[B_TOPK*(D_Q-D_V)];
++    float p_exchange_buf[4][32 * (B_TOPK/(128/B_H))];
++    bf16 s[B_H*B_TOPK];
++    char is_k_valid[NUM_BUFS][B_TOPK/8];
++    transac_bar_t bar_prologue_q_nope, bar_prologue_q_rope, bar_prologue_utccp_nope, bar_prologue_utccp_rope;
++    transac_bar_t bar_qk_nope_done[NUM_BUFS], bar_qk_rope_done;    // Pi = QKi^T (the nope part) done
++    transac_bar_t bar_sv_done[NUM_BUFS];    // O += SiVi done (i.e. O, Si and Vi are free)
++    transac_bar_t bar_kv_nope_ready[NUM_BUFS][2], bar_kv_rope_ready;
++    transac_bar_t bar_p_free;
++    transac_bar_t bar_so_ready;   // S and O are ready
++    transac_bar_t bar_o_write_back_done;
++    transac_bar_t bar_o_write_back_done_waited; // Whether the barrier above has been waited for. Used to prevent double arrive
++    transac_bar_t bar_k_valid_ready[NUM_BUFS], bar_k_valid_free[NUM_BUFS];
++    transac_bar_t bar_clc_full, bar_clc_empty;
++    array_aligned<uint32_t, 1> tmem_start_addr;
++    float rowwise_max_buf[128], rowwise_li_buf[128];
++    ku::CLCResponseObj clc_response_obj;
++};
++
++using SharedMemoryPlan = std::conditional_t<
++    HAVE_ROPE,
++    SharedMemoryPlanWithRope<D_Q, D_V>,
++    SharedMemoryPlanWithoutRope
++>;
++#else
+ struct SharedMemoryPlan {
+     union {
+         static_assert(B_H <= B_TOPK);
+@@ -141,6 +198,7 @@ struct SharedMemoryPlan {
+     float rowwise_max_buf[128], rowwise_li_buf[128];
+     ku::CLCResponseObj clc_response_obj;
+ };
++#endif
+ 
+ static constexpr int QK_MRGEMM_N = (128/B_H)*B_TOPK;
+ static constexpr int QK_MRGEMM_K_NOPE = D_V / (128/B_H);
+diff --git a/csrc/kernels/sm100/prefill/sparse/fwd/head64/phase1.cuh b/csrc/kernels/sm100/prefill/sparse/fwd/head64/phase1.cuh
+index aa5b824..4ca8725 100644
+--- a/csrc/kernels/sm100/prefill/sparse/fwd/head64/phase1.cuh
++++ b/csrc/kernels/sm100/prefill/sparse/fwd/head64/phase1.cuh
+@@ -430,7 +430,7 @@ KernelTemplate<FWD_MODE, D_QK>::sparse_attn_fwd_kernel_devfunc(const SparseAttnF
+                             o_bf16[j] = __float22bfloat162_rn(o[i*4+j]);
+                         }
+                         bf16* o_smem_ptr = sO_addrs[i] + (c*B_EPI_SB + (idx_in_warpgroup/B_H)*(B_EPI_SB/(128/B_H)) + k*B_EPI)*B_H;
+-                        ku::st_shared(o_smem_ptr, *(__int128_t*)(o_bf16));
++                        ku::st_shared(o_smem_ptr, *reinterpret_cast<ku::int128_t*>(o_bf16));
+                     }
+     
+                     // Sync
+@@ -564,7 +564,6 @@ KernelTemplate<FWD_MODE, D_QK>::sparse_attn_fwd_kernel_devfunc(const SparseAttnF
+                         // Pi = QKi^T
+                         auto [buf_idx, bar_phase] = rs.get<NUM_BUFS>();
+                         Tensor sK_nope = make_tensor(make_smem_ptr(plan.u.qko_slots[buf_idx].data()), SmemLayoutKNoPE_TiledMMA{});
+-                        Tensor sK_rope = make_tensor(make_smem_ptr(plan.qk_rope_slot), SmemLayoutKRoPE_TiledMMA{});
+     
+                         auto [__, binary_bar_phase] = rs.get<1>();
+                         plan.bar_p_free.wait(binary_bar_phase^1);
+@@ -573,6 +572,7 @@ KernelTemplate<FWD_MODE, D_QK>::sparse_attn_fwd_kernel_devfunc(const SparseAttnF
+                         // Wait for K (RoPE)
+                         // P = Q(rope) @ K(rope)^T
+                         if constexpr (HAVE_ROPE) {
++                            Tensor sK_rope = make_tensor(make_smem_ptr(plan.qk_rope_slot), SmemLayoutKRoPE_TiledMMA{});
+                             plan.bar_kv_rope_ready.wait(binary_bar_phase);
+                             ku::tcgen05_after_thread_sync();
+                             ku::utcmma_ts(tiled_mma_P, tQ_rope, sK_rope, tP, true);
+@@ -795,4 +795,3 @@ void run_sparse_fwd_phase1_kernel(const SparseAttnFwdParams& params) {
+ }
+ 
+ }
+-
+diff --git a/csrc/kernels/sm100/prefill/sparse/fwd_for_small_topk/head128/config.h b/csrc/kernels/sm100/prefill/sparse/fwd_for_small_topk/head128/config.h
+index e7abe49..8d08107 100644
+--- a/csrc/kernels/sm100/prefill/sparse/fwd_for_small_topk/head128/config.h
++++ b/csrc/kernels/sm100/prefill/sparse/fwd_for_small_topk/head128/config.h
+@@ -109,7 +109,33 @@ struct tmem_cols {
+     static constexpr int P = 384;
+ };
+ 
+-struct SharedMemoryPlan {
++struct alignas(128) PrefillSharedMemoryPlan {
++    array_aligned<bf16, B_TOPK*(D_K/2)> K[NUM_K_BUFS];
++    array_aligned<bf16, (H_Q/2)*B_TOPK> S;
++    array_aligned<bf16, (H_Q/2)*D_Q> Q;
++    float P_exchange[4][(H_Q/2/2)*(B_TOPK/2)];
++    float rowwise_max_buf[128], rowwise_li_buf[128];
++
++    CUTE_ALIGNAS(16) char is_k_valid[NUM_INDEX_BUFS][B_TOPK/8];
++    CUTE_ALIGNAS(16) int tma_coord[NUM_INDEX_BUFS][B_TOPK];
++
++    transac_bar_t bar_sQ_full, bar_tQ_empty, bar_tQ_full;
++    transac_bar_t bar_tOut_full, bar_tOut_empty;
++    transac_bar_t bar_KV_full[NUM_K_BUFS], bar_KV_empty[NUM_K_BUFS];
++    transac_bar_t bar_P_empty;
++    transac_bar_t bar_QK_done, bar_SV_done;
++    transac_bar_t bar_S_O_full;
++    transac_bar_t bar_li_full, bar_li_empty;
++    transac_bar_t bar_clc_full, bar_clc_empty;
++    transac_bar_t bar_valid_coord_scales_full[NUM_INDEX_BUFS], bar_valid_coord_scales_empty[NUM_INDEX_BUFS];
++
++    ku::CLCResponseObj clc_response_obj;
++    array_aligned<uint32_t, 1> tmem_start_addr;
++};
++
++template<int RawBufferCount>
++struct DecodeSharedMemoryPlan {
++    static constexpr int NUM_RAW_K_BUFS = RawBufferCount;
+     array_aligned<bf16, B_TOPK*(D_K/2)> K[NUM_K_BUFS];
+     array_aligned<bf16, (H_Q/2)*B_TOPK> S;
+     array_aligned<bf16, (H_Q/2)*D_Q> Q; // Will be output for epilogue
+@@ -120,7 +146,7 @@ struct SharedMemoryPlan {
+ 
+     CUTE_ALIGNAS(16) char is_k_valid[NUM_INDEX_BUFS][B_TOPK/8];
+     CUTE_ALIGNAS(16) int tma_coord[NUM_INDEX_BUFS][B_TOPK];
+-    CUTE_ALIGNAS(16) uint8_t scales[NUM_INDEX_BUFS][B_TOPK][IS_DECODE ? SCALE_SMEM_STRIDE_PER_CTA : 0];
++    CUTE_ALIGNAS(16) uint8_t scales[NUM_INDEX_BUFS][B_TOPK][SCALE_SMEM_STRIDE_PER_CTA];
+     
+     transac_bar_t bar_sQ_full, bar_tQ_empty, bar_tQ_full;
+     transac_bar_t bar_tOut_full, bar_tOut_empty;
+@@ -141,6 +167,12 @@ struct SharedMemoryPlan {
+     array_aligned<uint32_t, 1> tmem_start_addr;
+ };
+ 
++using SharedMemoryPlan = std::conditional_t<
++    IS_DECODE,
++    DecodeSharedMemoryPlan<NUM_RAW_K_BUFS>,
++    PrefillSharedMemoryPlan
++>;
++
+ using TiledMMA_P = decltype(make_tiled_mma(
+     SM100_MMA_F16BF16_2x1SM_TS_NOELECT<bf16, bf16, float, H_Q, B_TOPK*2, UMMA::Major::K, UMMA::Major::K>{}
+ )); // *2 for dual gemm
+diff --git a/csrc/kernels/sm100/prefill/sparse/fwd_for_small_topk/head128/phase1.cuh b/csrc/kernels/sm100/prefill/sparse/fwd_for_small_topk/head128/phase1.cuh
+index e9bdcc8..8a1fbaf 100644
+--- a/csrc/kernels/sm100/prefill/sparse/fwd_for_small_topk/head128/phase1.cuh
++++ b/csrc/kernels/sm100/prefill/sparse/fwd_for_small_topk/head128/phase1.cuh
+@@ -38,8 +38,15 @@ using FwdMode = SparseAttnFwdMode;
+ 
+ // NOTES. We found out that, if we use kerutils::st_shared, warpgroup 0 suffers from register spilling. However, if we change to this dump implementation with `__cvta_generic_to_shared`, there is no register spilling.
+ CUTE_DEVICE
+-void st_shared_with_cvta(void* ptr, __int128_t val) {
++void st_shared_with_cvta(void* ptr, ku::int128_t val) {
++#ifdef _MSC_VER
++    asm volatile("st.shared.v4.b32 [%0], {%1, %2, %3, %4};"
++                 :
++                 : "l"(__cvta_generic_to_shared(ptr)), "r"(val.x), "r"(val.y),
++                   "r"(val.z), "r"(val.w));
++#else
+     asm volatile("st.shared.b128 [%0], %1;" :: "l"(__cvta_generic_to_shared(ptr)), "q"(val));
++#endif
+ }
+ 
+ template<FwdMode FWD_MODE, int D_QK, ModelType MODEL_TYPE, ModelType EXTRA_MODEL_TYPE>
+@@ -270,7 +277,7 @@ KernelTemplate<FWD_MODE, D_QK, MODEL_TYPE, EXTRA_MODEL_TYPE>::sparse_attn_fwd_ke
+                         if (k == 0 && i == 0) {
+                             smem.bar_tQ_full.wait(args.outer_loop_phase^1^is_last_o);    // Wait for sQ's availability
+                         }
+-                        st_shared_with_cvta(o_addr, *(__int128_t*)o_bf16);
++                        st_shared_with_cvta(o_addr, *reinterpret_cast<ku::int128_t*>(o_bf16));
+                     }
+                 }
+ 
+@@ -312,7 +319,7 @@ KernelTemplate<FWD_MODE, D_QK, MODEL_TYPE, EXTRA_MODEL_TYPE>::sparse_attn_fwd_ke
+                         }
+                         st_shared_with_cvta(
+                             sO_accum_addrs[i] + cur_buf_idx*((H_Q/2)*B_EPI_SPLITKV*2),
+-                            *(__int128_t*)(o + i*4)
++                            *reinterpret_cast<ku::int128_t*>(o + i*4)
+                         );
+                     }
+ 
+@@ -889,7 +896,7 @@ KernelTemplate<FWD_MODE, D_QK, MODEL_TYPE, EXTRA_MODEL_TYPE>::sparse_attn_fwd_ke
+                 smem.bar_SV_done.wait(bar_phase^1);
+                 CUTE_UNROLL
+                 for (int i = 0; i < NUM_ELEMS_PER_THREAD/8; ++i) {
+-                    ku::st_shared(sS_base + i*8*(H_Q/2), *(__int128_t*)(s + i*4));
++                    ku::st_shared(sS_base + i*8*(H_Q/2), *reinterpret_cast<float4*>(s + i*4));
+                 }
+ 
+                 // Rescale O
+diff --git a/csrc/kernels/sm90/decode/dense/splitkv_mla.cuh b/csrc/kernels/sm90/decode/dense/splitkv_mla.cuh
+index bdd3c78..ddf8389 100644
+--- a/csrc/kernels/sm90/decode/dense/splitkv_mla.cuh
++++ b/csrc/kernels/sm90/decode/dense/splitkv_mla.cuh
+@@ -204,11 +204,11 @@ __forceinline__ __device__ void warpgroup_cooperative_qkt_gemm(
+ ) {
+     Tensor sQ_tiled = flat_divide(sQ, Shape<Int<T::BLOCK_SIZE_M>, _64>{})(_, _, _0{}, _);	// (BLOCK_SIZE_M, 64, 9)
+     Tensor sKV_tiled = flat_divide(sKV, Shape<Int<T::PAGE_BLOCK_SIZE>, _64>{})(_, _, _0{}, _);	// (PAGE_BLOCK_SIZE, 64, 9)
+-    TiledMMA tiled_mma_sQ = (typename T::TiledMMA_QK_sQ){};
++    TiledMMA tiled_mma_sQ = typename T::TiledMMA_QK_sQ{};
+     ThrMMA thr_mma_sQ = tiled_mma_sQ.get_slice(idx_in_warpgroup);
+     Tensor thr_mma_sQ_tiled = thr_mma_sQ.partition_fragment_A(sQ_tiled);	// (MMA, 1, 4, 9)
+     Tensor thr_mma_sKV_tiled = thr_mma_sQ.partition_fragment_B(sKV_tiled);	// (MMA, 1, 4, 9)
+-    TiledMMA tiled_mma_rQ = (typename T::TiledMMA_QK_rQ){};
++    TiledMMA tiled_mma_rQ = typename T::TiledMMA_QK_rQ{};
+ 
+     #define QKT_GEMM_ONE_TILE(TILE_IDX) \
+         if constexpr(TILE_IDX != 8) { \
+@@ -266,7 +266,7 @@ __forceinline__ __device__ void warpgroup_cooperative_qkt_gemm_no_pipeline(
+     Tensor<Engine2, Layout2> &rP,	// ((2, 2, 8), 1, 1)
+     int idx_in_warpgroup
+ ) {
+-    TiledMMA tiled_mma = (typename T::TiledMMA_QK_sQ){};
++    TiledMMA tiled_mma = typename T::TiledMMA_QK_sQ{};
+     ThrMMA thr_mma = tiled_mma.get_slice(idx_in_warpgroup);
+     Tensor thr_mma_sQ = thr_mma.partition_fragment_A(sQ);	// (MMA, 1, 576/16=36)
+     Tensor thr_mma_sKV = thr_mma.partition_fragment_B(sKV);	// (MMA, 1, 576/16=36)
+@@ -287,7 +287,7 @@ __forceinline__ __device__ void warpgroup_cooperative_pv_gemm_localP(
+     Tensor<Engine2, Layout2> &rO,	// ((2, 2, 32), 1, 1)
+     int idx_in_warpgroup
+ ) {
+-    TiledMMA tiled_mma = (typename T::TiledMMA_PV_LocalP){};
++    TiledMMA tiled_mma = typename T::TiledMMA_PV_LocalP{};
+     ThrMMA thr_mma = tiled_mma.get_slice(idx_in_warpgroup);
+     Tensor rP_retiled = make_tensor(rP.data(), Layout<
+         Shape<Shape<_2, _2, _2>, _1, _4>,
+@@ -311,7 +311,7 @@ __forceinline__ __device__ void warpgroup_cooperative_pv_gemm_remoteP(
+     Tensor<Engine2, Layout2> &rO,	// ((2, 2, 32), 1, 1)
+     int idx_in_warpgroup
+ ) {
+-    TiledMMA tiled_mma = (typename T::TiledMMA_PV_RemoteP){};
++    TiledMMA tiled_mma = typename T::TiledMMA_PV_RemoteP{};
+     ThrMMA thr_mma = tiled_mma.get_slice(idx_in_warpgroup);
+     Tensor thr_mma_sP = thr_mma.partition_fragment_A(sP);
+     Tensor thr_mma_sKV_half = thr_mma.partition_fragment_B(sKV_half);	// (MMA, 1, 64/16=4)
+@@ -488,7 +488,7 @@ __forceinline__ __device__ void save_rPb_to_sP(
+ ) {
+     auto r2s_copy = make_tiled_copy_C(
+         Copy_Atom<SM90_U32x4_STSM_N, typename T::InputT>{},
+-        (typename T::TiledMMA_QK_sQ){}
++        typename T::TiledMMA_QK_sQ{}
+     );
+     ThrCopy thr_copy = r2s_copy.get_slice(idx_in_warpgroup);
+     Tensor thr_copy_rPb = thr_copy.retile_S(rPb);
+@@ -510,7 +510,7 @@ __forceinline__ __device__ void retrieve_rP_from_sP(
+ ) {
+     TiledCopy s2r_copy = make_tiled_copy_A(
+         Copy_Atom<SM75_U32x4_LDSM_N, typename T::InputT>{},
+-        (typename T::TiledMMA_PV_LocalP){}
++        typename T::TiledMMA_PV_LocalP{}
+     );
+     ThrCopy thr_copy = s2r_copy.get_slice(idx_in_warpgroup);
+     Tensor thr_copy_sP = thr_copy.partition_S(sP);
+@@ -635,7 +635,7 @@ __forceinline__ __device__ void store_o(
+         Tensor sMyOutputBuf = local_tile(sOutputBuf, Shape<_64, _256>{}, make_coord(_0{}, warpgroup_idx));
+         TiledCopy r2s_tiled_copy = make_tiled_copy_C(
+             Copy_Atom<SM90_U32x4_STSM_N, InputT>{},
+-            (typename T::TiledMMA_PV_LocalP){}
++            typename T::TiledMMA_PV_LocalP{}
+         );
+         ThrCopy r2s_thr_copy = r2s_tiled_copy.get_slice(idx_in_warpgroup);
+         Tensor r2s_thr_copy_rOb = r2s_thr_copy.retile_S(rOb);
+@@ -717,7 +717,7 @@ template<
+ __forceinline__ __device__ auto get_half_V(
+     Tensor<Engine0, Layout0> &sK
+ ) {
+-    Tensor sV = make_tensor(sK.data(), (typename T::SmemLayoutV){});
++    Tensor sV = make_tensor(sK.data(), typename T::SmemLayoutV{});
+     return flat_divide(sV, Shape<Int<T::HEAD_DIM_V/2>, Int<T::PAGE_BLOCK_SIZE>>{})(_, _, Int<(int)IS_R>{}, _0{});
+ }
+ 
+@@ -979,10 +979,10 @@ flash_fwd_splitkv_mla_kernel(__grid_constant__ const DenseAttnDecodeParams param
+     extern __shared__ char wksp_buf[];
+     using SharedMemoryPlan = typename T::SharedMemoryPlan;
+     SharedMemoryPlan &plan = *reinterpret_cast<SharedMemoryPlan*>(wksp_buf);
+-    Tensor sQ = make_tensor(make_smem_ptr(plan.smem_sQ.data()), (typename T::SmemLayoutQ){});
+-    Tensor sK0 = make_tensor(make_smem_ptr(plan.smem_sK0.data()), (typename T::SmemLayoutK){});
+-    Tensor sK1 = make_tensor(make_smem_ptr(plan.smem_sK1.data()), (typename T::SmemLayoutK){});
+-    Tensor sP0 = make_tensor(make_smem_ptr(plan.smem_sP0.data()), (typename T::SmemLayoutP0){});
++    Tensor sQ = make_tensor(make_smem_ptr(plan.smem_sQ.data()), typename T::SmemLayoutQ{});
++    Tensor sK0 = make_tensor(make_smem_ptr(plan.smem_sK0.data()), typename T::SmemLayoutK{});
++    Tensor sK1 = make_tensor(make_smem_ptr(plan.smem_sK1.data()), typename T::SmemLayoutK{});
++    Tensor sP0 = make_tensor(make_smem_ptr(plan.smem_sP0.data()), typename T::SmemLayoutP0{});
+     Tensor sP1 = flat_divide(sQ, Shape<Int<T::BLOCK_SIZE_M>, Int<T::PAGE_BLOCK_SIZE>>{})(_, _, _0{}, _8{}); // Overlap with sQ's 8-th tile
+     Tensor sM = make_tensor(make_smem_ptr(plan.smem_sM.data()), make_shape(Int<T::BLOCK_SIZE_M>{}));
+     Tensor sL_reduction_wksp = make_tensor(make_smem_ptr(plan.sL_reduction_wksp.data()), make_shape(Int<2*T::BLOCK_SIZE_M>{}));
+@@ -1085,7 +1085,7 @@ flash_fwd_splitkv_mla_kernel(__grid_constant__ const DenseAttnDecodeParams param
+             launch_kv_tiles_copy_tma<0, 4>(tma_gK(_, _, __ldg(block_table_ptr + start_block_idx+1)), sK1, tma_params.tma_K, barriers_K1, threadIdx.x);
+         }
+ 
+-        Tensor rO = partition_fragment_C((typename T::TiledMMA_PV_LocalP){}, Shape<Int<T::BLOCK_SIZE_M>, Int<T::HEAD_DIM_V / 2>>{});	// ((2, 2, 32), 1, 1)
++        Tensor rO = partition_fragment_C(typename T::TiledMMA_PV_LocalP{}, Shape<Int<T::BLOCK_SIZE_M>, Int<T::HEAD_DIM_V / 2>>{});	// ((2, 2, 32), 1, 1)
+         float rL[2];
+         rL[0] = rL[1] = 0.0f;
+         
+@@ -1104,7 +1104,7 @@ flash_fwd_splitkv_mla_kernel(__grid_constant__ const DenseAttnDecodeParams param
+ 
+         if (warpgroup_idx == 0) {
+             // Warpgroup 0
+-            Tensor rP0 = make_tensor<float>((typename T::rP0Layout){});
++            Tensor rP0 = make_tensor<float>(typename T::rP0Layout{});
+             
+             // NOTE We don't use the pipelined version of Q K^T here since it leads
+             // to a slow-down (or even register spilling, thanks to the great NVCC)
+@@ -1148,7 +1148,7 @@ flash_fwd_splitkv_mla_kernel(__grid_constant__ const DenseAttnDecodeParams param
+ 
+         } else {
+             // Warpgroup 1
+-            Tensor rP1 = make_tensor<float>((typename T::rP0Layout){});
++            Tensor rP1 = make_tensor<float>(typename T::rP0Layout{});
+             
+             if (start_block_idx+1 < end_block_idx) {
+                 // Issue rP1 = sQ @ sK1, wait
+diff --git a/csrc/kernels/sm90/decode/sparse/components/helpers.h b/csrc/kernels/sm90/decode/sparse/components/helpers.h
+index 5d1c1d2..6a08185 100644
+--- a/csrc/kernels/sm90/decode/sparse/components/helpers.h
++++ b/csrc/kernels/sm90/decode/sparse/components/helpers.h
+@@ -77,7 +77,7 @@ void launch_tma_copy(
+ template<typename T>
+ CUTE_DEVICE
+ static void st_async_128b(void* dst_ptr, const T& data, const transac_bar_t* mbar_ptr) {
+-    long2 data_long2 = *reinterpret_cast<const long2*>(&data);
++    longlong2 data_long2 = *reinterpret_cast<const longlong2*>(&data);
+     uint32_t dst_addr = cute::cast_smem_ptr_to_uint(dst_ptr);
+     uint32_t mbar_addr = cute::cast_smem_ptr_to_uint(mbar_ptr);
+     asm volatile (
+diff --git a/csrc/kernels/sm90/decode/sparse/splitkv_mla.cuh b/csrc/kernels/sm90/decode/sparse/splitkv_mla.cuh
+index 523afab..d57759c 100644
+--- a/csrc/kernels/sm90/decode/sparse/splitkv_mla.cuh
++++ b/csrc/kernels/sm90/decode/sparse/splitkv_mla.cuh
+@@ -586,7 +586,8 @@ __device__ void KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnD
+                         auto dequant_and_save_bf16x8 = [&](const fp8x8 &data, int offset) {
+                             int smem_offset = (dim_idx*64 + offset) * TOPK_BLOCK_SIZE;
+                             bf16x8 cur_bf16x8 = cvt_fp8x8_bf16x8(data, __bfloat162bfloat162(*(__nv_bfloat16*)(&scale)));
+-                            *(__int128_t*)(sK_nope_base + smem_offset) = *(__int128_t*)&cur_bf16x8;
++                            *reinterpret_cast<ku::int128_t*>(sK_nope_base + smem_offset) =
++                                *reinterpret_cast<ku::int128_t*>(&cur_bf16x8);
+                             if constexpr (CLUSTER_SIZE == 2) {
+                                 st_async_128b(sK_nope_peer_base + smem_offset, cur_bf16x8, peer_bar_k_remote_ready);
+                             }
+@@ -616,7 +617,8 @@ __device__ void KernelTemplate<MODEL_TYPE, NUM_HEADS>::devfunc(const SparseAttnD
+                                 *(uint128_t*)(&cur_bf16x8) = uint128_t();
+                         }
+                         int smem_offset = (HEAD_DIM_NOPE + dim_idx*32) * TOPK_BLOCK_SIZE;
+-                        *(__int128_t*)(sK_rope_base + smem_offset) = *(__int128_t*)&cur_bf16x8;
++                        *reinterpret_cast<ku::int128_t*>(sK_rope_base + smem_offset) =
++                            *reinterpret_cast<ku::int128_t*>(&cur_bf16x8);
+                         if constexpr (CLUSTER_SIZE == 2) {
+                             st_async_128b(sK_rope_peer_base + smem_offset, cur_bf16x8, peer_bar_k_remote_ready);
+                         }
+diff --git a/csrc/kernels/smxx/decode/combine/combine.cu b/csrc/kernels/smxx/decode/combine/combine.cu
+index 7bd34da..95d9b50 100644
+--- a/csrc/kernels/smxx/decode/combine/combine.cu
++++ b/csrc/kernels/smxx/decode/combine/combine.cu
+@@ -97,7 +97,7 @@ flash_fwd_mla_combine_kernel(__grid_constant__ const CombineParams params) {
+ 
+         float global_lse = (sum_lse == 0.f || sum_lse == -INFINITY) ? INFINITY : log2f(sum_lse) + max_lse;
+         if (lane_idx == 0)
+-            gLse(warp_idx) = global_lse / (float)M_LOG2E;
++            gLse(warp_idx) = global_lse / CUDART_L2E_F;
+         
+         if (params.attn_sink != nullptr) {
+             int q_head_idx = h_block_idx*BLOCK_SIZE_M + warp_idx;
+diff --git a/csrc/kerutils/include/kerutils/device/common.h b/csrc/kerutils/include/kerutils/device/common.h
+index 05d671e..c9eb00c 100644
+--- a/csrc/kerutils/include/kerutils/device/common.h
++++ b/csrc/kerutils/include/kerutils/device/common.h
+@@ -37,6 +37,12 @@ using nve4m3x4 = __nv_fp8x4_e4m3;
+ using bf16 = cutlass::bfloat16_t;
+ using transac_bar_t = cutlass::arch::ClusterTransactionBarrier;
+ 
++#ifdef _MSC_VER
++using int128_t = int4;
++#else
++using int128_t = __int128_t;
++#endif
++
+ }
+ 
+ #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800))
+diff --git a/csrc/kerutils/include/kerutils/device/sm100/gemm.cuh b/csrc/kerutils/include/kerutils/device/sm100/gemm.cuh
+index 2500d80..7479f4f 100644
+--- a/csrc/kerutils/include/kerutils/device/sm100/gemm.cuh
++++ b/csrc/kerutils/include/kerutils/device/sm100/gemm.cuh
+@@ -99,6 +99,7 @@ struct SM100_MMA_F16BF16_WS_TS_NOELECT
+       uint32_t const& scaleC,
+       uint64_t const& idescE)
+   {
++#if defined(CUTE_ARCH_TCGEN05_F16F32_MMA_ENABLED)
+     asm volatile(
+       "{\n\t"
+       ".reg .pred p;\n\t"
+@@ -107,6 +108,9 @@ struct SM100_MMA_F16BF16_WS_TS_NOELECT
+       "}\n"
+       :
+       : "r"(tmem_c), "r"(tmem_a), "l"(desc_b), "r"(uint32_t(idescE>>32)), "r"(scaleC));
++#else
++    CUTE_INVALID_CONTROL_PATH("Attempting to use SM100_MMA_F16BF16_WS_TS_NOELECT without CUTE_ARCH_TCGEN05_F16F32_MMA_ENABLED");
++#endif
+   }
+ };
+ 
+@@ -200,6 +204,7 @@ struct SM100_MMA_F16BF16_WS_SS_NOELECT
+       uint32_t const& scaleC,
+       uint64_t const& idescE)
+   {
++#if defined(CUTE_ARCH_TCGEN05_F16F32_MMA_ENABLED)
+     asm volatile(
+       "{\n\t"
+       ".reg .pred p;\n\t"
+@@ -208,6 +213,9 @@ struct SM100_MMA_F16BF16_WS_SS_NOELECT
+       "}\n"
+       :
+       : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(uint32_t(idescE>>32)), "r"(scaleC));
++#else
++    CUTE_INVALID_CONTROL_PATH("Attempting to use SM100_MMA_F16BF16_WS_SS_NOELECT without CUTE_ARCH_TCGEN05_F16F32_MMA_ENABLED");
++#endif
+   }
+ };
+ 
+@@ -513,6 +521,7 @@ struct SM100_MMA_F16BF16_TS_NOELECT
+       uint32_t const& scaleC,
+       uint64_t const& idescE)
+   {
++#if defined(CUTE_ARCH_TCGEN05_F16F32_MMA_ENABLED)
+     uint32_t mask[4] = {0, 0, 0, 0};
+     asm volatile(
+       "{\n\t"
+@@ -523,6 +532,9 @@ struct SM100_MMA_F16BF16_TS_NOELECT
+       :
+       : "r"(tmem_c), "r"(tmem_a), "l"(desc_b), "r"(uint32_t(idescE>>32)), "r"(scaleC),
+         "r"(mask[0]), "r"(mask[1]), "r"(mask[2]), "r"(mask[3]));
++#else
++    CUTE_INVALID_CONTROL_PATH("Attempting to use SM100_MMA_F16BF16_TS_NOELECT without CUTE_ARCH_TCGEN05_F16F32_MMA_ENABLED");
++#endif
+   }
+ };
+ 
+@@ -614,6 +626,7 @@ struct SM100_MMA_F16BF16_SS_NOELECT
+       uint32_t const& scaleC,
+       uint64_t const& idescE)
+   {
++#if defined(CUTE_ARCH_TCGEN05_F16F32_MMA_ENABLED)
+     uint32_t mask[4] = {0, 0, 0, 0};
+     asm volatile(
+       "{\n\t"
+@@ -624,6 +637,9 @@ struct SM100_MMA_F16BF16_SS_NOELECT
+       :
+       : "r"(tmem_c), "l"(desc_a), "l"(desc_b), "r"(uint32_t(idescE>>32)), "r"(scaleC),
+         "r"(mask[0]), "r"(mask[1]), "r"(mask[2]), "r"(mask[3]));
++#else
++    CUTE_INVALID_CONTROL_PATH("Attempting to use SM100_MMA_F16BF16_SS_NOELECT without CUTE_ARCH_TCGEN05_F16F32_MMA_ENABLED");
++#endif
+   }
+ };
+ 
+diff --git a/csrc/kerutils/include/kerutils/device/sm100/intrinsics.cuh b/csrc/kerutils/include/kerutils/device/sm100/intrinsics.cuh
+index 49e6d2c..909a6e3 100644
+--- a/csrc/kerutils/include/kerutils/device/sm100/intrinsics.cuh
++++ b/csrc/kerutils/include/kerutils/device/sm100/intrinsics.cuh
+@@ -632,7 +632,7 @@ void tmem_ld_st_decomposed(uint32_t tmem_start, void* data, F&& tmem_ld_st_fn) {
+         return;
+     } else {
+         // Largest power-of-2 <= kNumReplications
+-        constexpr int kHighBit = 1 << (31 - __builtin_clz(kNumReplications));
++        constexpr int kHighBit = cute::bit_floor(uint32_t(kNumReplications));
+         tmem_ld_st_fn.template operator()<kHighBit>(tmem_start, data);
+         // Recurse on the remainder
+         constexpr int kRemaining = kNumReplications - kHighBit;
+diff --git a/csrc/kerutils/include/kerutils/device/sm80/helpers.cuh b/csrc/kerutils/include/kerutils/device/sm80/helpers.cuh
+index be8aec6..f1fed00 100644
+--- a/csrc/kerutils/include/kerutils/device/sm80/helpers.cuh
++++ b/csrc/kerutils/include/kerutils/device/sm80/helpers.cuh
+@@ -30,26 +30,39 @@ float2 float2float2(const float &x) {
+ }
+ 
+ CUTE_DEVICE
+-void st_shared(void* ptr, __int128_t val) {
++void st_shared(void* ptr, int128_t val) {
++#ifdef _MSC_VER
++    asm volatile("st.shared.v4.b32 [%0], {%1, %2, %3, %4};"
++                 :
++                 : "r"(cute::cast_smem_ptr_to_uint(ptr)), "r"(val.x), "r"(val.y),
++                   "r"(val.z), "r"(val.w));
++#else
+     asm volatile("st.shared.b128 [%0], %1;" :: "r"(cute::cast_smem_ptr_to_uint(ptr)), "q"(val));
++#endif
+ }
+ 
+ CUTE_DEVICE
+ void st_shared(void* ptr, float4 val) {
+-    st_shared(ptr, *(__int128_t*)&val);
++    st_shared(ptr, *reinterpret_cast<int128_t*>(&val));
+ }
+ 
+ CUTE_DEVICE
+-__int128_t ld_shared(const void* ptr) {
+-    __int128_t val;
++int128_t ld_shared(const void* ptr) {
++    int128_t val;
++#ifdef _MSC_VER
++    asm volatile("ld.shared.v4.b32 {%0, %1, %2, %3}, [%4];"
++                 : "=r"(val.x), "=r"(val.y), "=r"(val.z), "=r"(val.w)
++                 : "r"(cute::cast_smem_ptr_to_uint(ptr)));
++#else
+     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(val) : "r"(cute::cast_smem_ptr_to_uint(ptr)));
++#endif
+     return val;
+ }
+ 
+ CUTE_DEVICE
+ float4 ld_shared_float4(const void* ptr) {
+-    __int128_t temp = ld_shared(ptr);
+-    return *(float4*)&temp;
++    auto temp = ld_shared(ptr);
++    return *reinterpret_cast<float4*>(&temp);
+ }
+ 
+ }
+diff --git a/csrc/kerutils/include/kerutils/device/sm90/intrinsics.cuh b/csrc/kerutils/include/kerutils/device/sm90/intrinsics.cuh
+index 07c5f9a..0843e17 100644
+--- a/csrc/kerutils/include/kerutils/device/sm90/intrinsics.cuh
++++ b/csrc/kerutils/include/kerutils/device/sm90/intrinsics.cuh
+@@ -9,7 +9,7 @@ template<typename T>
+ CUTE_DEVICE
+ static void st_async(void* dst_ptr, const T& data, transac_bar_t &mbar) {
+     static_assert(sizeof(T) == 16, "Data type must be 16 bytes (128 bits) for st_async.");
+-    long2 data_long2 = *reinterpret_cast<const long2*>(&data);
++    longlong2 data_long2 = *reinterpret_cast<const longlong2*>(&data);
+     uint32_t dst_addr = cute::cast_smem_ptr_to_uint(dst_ptr);
+     uint32_t mbar_addr = cute::cast_smem_ptr_to_uint(&mbar);
+     asm volatile (
+diff --git a/csrc/cutlass/include/cutlass/cuda_host_adapter.hpp b/csrc/cutlass/include/cutlass/cuda_host_adapter.hpp
+index 8cf41c1b..c9790628 100644
+--- a/csrc/cutlass/include/cutlass/cuda_host_adapter.hpp
++++ b/csrc/cutlass/include/cutlass/cuda_host_adapter.hpp
+@@ -405,7 +405,6 @@ public:
+ 
+   /// Fills a buffer in Global Memory with a byte sequence copied from host memory
+   template<class FillValueType>
+-  CUTLASS_HOST_DEVICE
+   Status memsetDevice(
+       void* destination,
+       FillValueType fill_value, 
