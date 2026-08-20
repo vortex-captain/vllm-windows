@@ -11,6 +11,7 @@ from huggingface_hub.utils import LocalEntryNotFoundError
 
 import vllm.model_executor.model_loader.weight_utils as weight_utils
 from vllm.model_executor.model_loader.weight_utils import (
+    _synchronize_safetensors_mmap_before_close,
     download_weights_from_hf,
     drop_checkpoint_cache,
     initialize_single_dummy_weight,
@@ -108,6 +109,24 @@ def test_make_attention_sink_registers_loader_and_padding(num_heads, dtype):
     assert sink.requires_grad is False
     assert torch.isinf(sink).all() and (sink < 0).all()
     assert sink.weight_loader is load_attention_sink
+
+
+def test_synchronize_safetensors_mmap_on_windows_integrated_gpu(monkeypatch):
+    from vllm.model_executor.model_loader import weight_utils
+
+    synchronize_calls = []
+    monkeypatch.setattr(weight_utils.os, "name", "nt")
+    monkeypatch.setattr(weight_utils.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        weight_utils.current_platform, "is_integrated_gpu", lambda device: True
+    )
+    monkeypatch.setattr(weight_utils.torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(
+        weight_utils.torch.cuda, "synchronize", lambda: synchronize_calls.append(0)
+    )
+
+    assert _synchronize_safetensors_mmap_before_close()
+    assert synchronize_calls == [0]
 
 
 def test_download_weights_from_hf():
