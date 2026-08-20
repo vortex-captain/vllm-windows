@@ -35,6 +35,8 @@ if not (_pkg / "_C.py").is_file():
 # Avoid DeepGEMM's clean-git assertion when vendoring a local dirty tree.
 env = os.environ.copy()
 env.pop("DG_SKIP_CUDA_BUILD", None)
+if cuda_include_overlay := env.get("VLLM_CUDA_INCLUDE_OVERLAY"):
+    env["DG_CUDA_INCLUDE_OVERLAY"] = cuda_include_overlay
 
 cmd = [sys.executable, "setup.py", "build_ext", "--inplace"]
 if is_windows:
