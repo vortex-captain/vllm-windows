@@ -63,6 +63,14 @@ else()
   message(STATUS "DeepGEMM is available at ${deepgemm_SOURCE_DIR}")
 endif()
 
+if(WIN32)
+  vllm_apply_patch(
+    "DeepGEMM Windows ARM64"
+    "${deepgemm_SOURCE_DIR}"
+    "${CMAKE_CURRENT_LIST_DIR}/../patches/deepgemm-win-arm64.patch"
+    UNIDIFF_ZERO)
+endif()
+
 # DeepGEMM requires CUDA 12.3+ for SM90, 12.9+ for SM100 (official upstream),
 # and 12.8+ for SM120 / SM12x. CUDA 13+ can use the family-specific SM12x
 # arch; CUDA 12.x builds the arch-specific SM120/SM121 variants.
@@ -160,7 +168,9 @@ if(DEEPGEMM_ARCHS)
     install(DIRECTORY "${_dg_dir}/"
       DESTINATION vllm/third_party/deep_gemm
       COMPONENT _deep_gemm_C
-      FILES_MATCHING PATTERN "_C.cpython-*.so")
+      FILES_MATCHING
+      PATTERN "_C.cpython-*.so"
+      PATTERN "_C.cp*-win_*.pyd")
   endforeach()
   add_custom_target(_deep_gemm_C ALL DEPENDS ${_dg_markers})
 

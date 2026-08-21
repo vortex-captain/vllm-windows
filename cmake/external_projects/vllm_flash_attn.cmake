@@ -29,6 +29,23 @@ if (DEFINED ENV{VLLM_FLASH_ATTN_SRC_DIR})
   set(VLLM_FLASH_ATTN_SRC_DIR $ENV{VLLM_FLASH_ATTN_SRC_DIR})
 endif()
 
+set(VLLM_FLASH_ATTN_WINDOWS_PATCH
+    "${CMAKE_CURRENT_LIST_DIR}/../patches/vllm-flash-attn-sm103-sm120.patch")
+
+set(VLLM_FLASH_ATTN_PATCH_COMMAND)
+if(WIN32)
+  list(APPEND VLLM_FLASH_ATTN_PATCH_COMMAND
+    PATCH_COMMAND
+      "${CMAKE_COMMAND}"
+      "-DVLLM_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+      "-DPATCH_NAME=vLLM FlashAttention SM103 and SM120"
+      "-DPATCH_WORKING_DIRECTORY=<SOURCE_DIR>"
+      "-DPATCH_FILE=${VLLM_FLASH_ATTN_WINDOWS_PATCH}"
+      "-DPATCH_BINARY_DIR=${CMAKE_BINARY_DIR}"
+      "-DPython_EXECUTABLE=${Python_EXECUTABLE}"
+      -P "${CMAKE_CURRENT_LIST_DIR}/../apply_dependency_patch.cmake")
+endif()
+
 if(VLLM_FLASH_ATTN_SRC_DIR)
   FetchContent_Declare(
           vllm-flash-attn SOURCE_DIR
@@ -43,6 +60,7 @@ else()
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
+          ${VLLM_FLASH_ATTN_PATCH_COMMAND}
   )
 endif()
 
@@ -63,6 +81,12 @@ install(CODE "set(CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}/vllm/\")" ALL_
 if (WIN32)
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler=/Zc:preprocessor")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zc:preprocessor")
+  if(VLLM_FLASH_ATTN_SRC_DIR)
+    vllm_apply_patch(
+      "vLLM FlashAttention SM103 and SM120"
+      "${VLLM_FLASH_ATTN_SRC_DIR}"
+      "${VLLM_FLASH_ATTN_WINDOWS_PATCH}")
+  endif()
 endif()
 
 FetchContent_MakeAvailable(vllm-flash-attn)
@@ -74,6 +98,11 @@ message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
 if (WIN32)
   foreach(_fa_tgt _vllm_fa2_C _vllm_fa3_C)
     if(TARGET ${_fa_tgt})
+      set_target_properties(${_fa_tgt} PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED ON
+        CUDA_STANDARD 20
+        CUDA_STANDARD_REQUIRED ON)
       target_compile_options(${_fa_tgt} PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>
         $<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor>
