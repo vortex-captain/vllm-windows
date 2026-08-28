@@ -4,8 +4,8 @@ import argparse
 import contextlib
 import json
 import multiprocessing
-import threading
 import platform
+import threading
 import time
 import weakref
 from collections.abc import Callable, Sequence
@@ -40,6 +40,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
 from vllm.utils.network_utils import get_open_zmq_ipc_path, get_tcp_uri
+from vllm.utils.subprocess_utils import popen_with_inherited_socket
 from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -352,11 +353,7 @@ class RustFrontendProcessManager:
         data_parallel_size: int,
         stats_update_address: str | None = None,
     ):
-        import os
-        import subprocess
-
         fd = sock.fileno()
-        os.set_inheritable(fd, True)
 
         cmd = [
             binary_path,
@@ -405,7 +402,7 @@ class RustFrontendProcessManager:
 
         redacted_json = json.dumps(redact_sensitive_args(args_dict), sort_keys=True)
         logger.info("Launching Rust frontend: %s", " ".join(cmd[:-1] + [redacted_json]))
-        self._proc = subprocess.Popen(cmd, pass_fds=(fd,))
+        self._proc = popen_with_inherited_socket(cmd, sock)
 
         # Create a process wrapper with a sentinel fd for monitoring
         self.processes: list[_SubprocessWrapper] = [
@@ -417,8 +414,6 @@ class RustFrontendProcessManager:
     def shutdown(self, timeout: float | None = None) -> None:
         if self._finalizer.detach() is not None:
             _shutdown_subprocesses(self.processes, timeout=timeout)
-
-
 class _SubprocessWrapper:
     """Wraps subprocess.Popen to provide the BaseProcess-like interface
     needed by wait_for_completion_or_failure."""
