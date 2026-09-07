@@ -1,7 +1,7 @@
 # Install OpenAI triton_kernels from https://github.com/triton-lang/triton/tree/main/python/triton_kernels
 
 if(WIN32)
-  set(DEFAULT_TRITON_KERNELS_TAG "4790f15d480bc32d0c8c2c58dfb68a3dd53eb826")
+  set(DEFAULT_TRITON_KERNELS_TAG "v3.6.0-windows.post26")
 else()
   set(DEFAULT_TRITON_KERNELS_TAG "v3.5.1")
 endif()
