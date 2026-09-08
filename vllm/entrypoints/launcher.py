@@ -5,7 +5,6 @@ import asyncio
 import signal
 import socket
 import sys
-from collections.abc import Callable
 from functools import partial
 from typing import Any
 
@@ -23,18 +22,6 @@ from vllm.logger import init_logger
 from vllm.utils.network_utils import find_process_using_port
 
 logger = init_logger(__name__)
-
-
-def _register_signal_handlers(
-    loop: asyncio.AbstractEventLoop,
-    signal_handler: Callable[[], None],
-) -> None:
-    if sys.platform == "win32":
-        signal.signal(signal.SIGINT, lambda *_: signal_handler())
-        signal.signal(signal.SIGTERM, lambda *_: signal_handler())
-    else:
-        loop.add_signal_handler(signal.SIGINT, signal_handler)
-        loop.add_signal_handler(signal.SIGTERM, signal_handler)
 
 
 async def serve_http(
@@ -117,7 +104,10 @@ async def serve_http(
     async def dummy_shutdown() -> None:
         pass
 
-    _register_signal_handlers(loop, signal_handler)
+    loop.add_signal_handler(signal.SIGINT, signal_handler)
+    loop.add_signal_handler(signal.SIGTERM, signal_handler)
+    if sys.platform == "win32":
+        loop.add_signal_handler(signal.SIGBREAK, signal_handler)
 
     async def handle_shutdown() -> None:
         await shutdown_event.wait()

@@ -7,11 +7,11 @@ import contextlib
 import multiprocessing
 import os
 import platform
-from shutil import which
 import signal
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from shutil import which
 from typing import TextIO
 
 import psutil
@@ -273,11 +273,17 @@ def kill_process_tree(pid: int):
     if sys.platform == "win32":
         # signal.SIGKILL does not exist on Windows; psutil.kill() uses
         # TerminateProcess and preserves the same forceful-shutdown semantics.
-        for child in children:
-            with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
-                child.kill()
-        with contextlib.suppress(psutil.NoSuchProcess, psutil.AccessDenied):
-            parent.kill()
+        access_denied: psutil.AccessDenied | None = None
+        for process in [*children, parent]:
+            try:
+                process.kill()
+            except psutil.NoSuchProcess:
+                pass
+            except psutil.AccessDenied as exc:
+                if access_denied is None:
+                    access_denied = exc
+        if access_denied is not None:
+            raise access_denied
     else:
         # Send SIGKILL to all children first
         for child in children:
