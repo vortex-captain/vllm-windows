@@ -2,6 +2,8 @@
 param(
     [string]$VenvDir = "",
     [string]$WheelDir = "",
+    [string]$BuildBase = "",
+    [string]$ConfigureDir = "",
     [string]$CudaPath = $env:CUDA_PATH,
     [string]$VisualStudioPath = "",
     [string]$MsvcToolsetVersion = "14.51.36231",
@@ -15,6 +17,7 @@ param(
     [string]$VersionOverride = "0.31.1rc1.dev642+gfa75d3456.cu134",
     [string]$PerlPath = "",
     [string]$ProtocPath = "",
+    [string]$ProtocIncludePath = "",
     [switch]$SkipRustFrontend,
     [switch]$SkipBuild
 )
@@ -25,7 +28,8 @@ param(
 # cmake>=3.26.1, ninja, packaging>=24.2, setuptools>=77.0.3,<81.0.0,
 # setuptools-scm>=8, setuptools-rust>=1.9.0, wheel, jinja2>=3.1.6, regex,
 # build, protobuf, Rust 1.95+, and a full Perl distribution for vendored
-# OpenSSL. Pass -PerlPath and -ProtocPath when they are not discoverable.
+# OpenSSL. Pass -PerlPath, -ProtocPath, and -ProtocIncludePath when they are not
+# discoverable; the include path must contain google\protobuf\struct.proto.
 # CUDA uses MsvcToolsetVersion; Rust/OpenSSL uses RustMsvcToolsetVersion to
 # avoid the optimized OpenSSL TLS crash observed with MSVC 14.51 on ARM64.
 #
@@ -48,8 +52,23 @@ if (-not $WheelDir) {
 
 $VenvDir = [IO.Path]::GetFullPath($VenvDir)
 $WheelDir = [IO.Path]::GetFullPath($WheelDir)
+$buildProfile = [regex]::Replace(
+    $CudaArchList.ToLowerInvariant().Replace("+", "-"),
+    "[^0-9a-z]+",
+    "-"
+).Trim("-")
+if (-not $buildProfile) {
+    throw "CudaArchList did not produce a valid build profile name."
+}
+if (-not $BuildBase) {
+    $BuildBase = Join-Path $RepoRoot "build\profiles\$buildProfile"
+}
+$BuildBase = [IO.Path]::GetFullPath($BuildBase)
 $CudaOverlay = Join-Path $RepoRoot "build\cuda-include-arm64"
-$ConfigureDir = Join-Path $RepoRoot "build\win-arm64-config"
+if (-not $ConfigureDir) {
+    $ConfigureDir = Join-Path $BuildBase "configure-only"
+}
+$ConfigureDir = [IO.Path]::GetFullPath($ConfigureDir)
 
 function Find-VcVarsAll {
     param(
@@ -217,11 +236,38 @@ function Initialize-RustBuildEnvironment {
         throw "protoc.exe is required for the Rust frontend. Pass -ProtocPath."
     }
 
+    $resolvedProtocInclude = $ProtocIncludePath
+    if (-not $resolvedProtocInclude) {
+        $protocRoot = Split-Path -Parent (Split-Path -Parent $resolvedProtoc)
+        $protocIncludeCandidates = @(
+            (Join-Path $protocRoot "include"),
+            (Join-Path $VenvDir "Library\include")
+        )
+        $resolvedProtocInclude = $protocIncludeCandidates |
+            Where-Object {
+                Test-Path -LiteralPath (
+                    Join-Path $_ "google\protobuf\struct.proto"
+                ) -PathType Leaf
+            } |
+            Select-Object -First 1
+    }
+    $standardProto = if ($resolvedProtocInclude) {
+        Join-Path $resolvedProtocInclude "google\protobuf\struct.proto"
+    }
+    if (-not $standardProto -or -not (Test-Path -LiteralPath $standardProto -PathType Leaf)) {
+        throw (
+            "The protoc standard include tree is required for the Rust frontend. " +
+            "Pass -ProtocIncludePath with a directory containing " +
+            "google\protobuf\struct.proto."
+        )
+    }
+
     $env:PATH = (
         (Split-Path -Parent $resolvedPerl),
         $env:PATH
     ) -join [IO.Path]::PathSeparator
     $env:PROTOC = (Resolve-Path -LiteralPath $resolvedProtoc).Path
+    $env:PROTOC_INCLUDE = (Resolve-Path -LiteralPath $resolvedProtocInclude).Path
     $env:VLLM_REQUIRE_RUST_FRONTEND = "1"
 
     $rustEnvironment = [ordered]@{}
@@ -426,6 +472,7 @@ function Set-BuildEnvironment {
     $env:VLLM_DISABLE_FA3_BUILD = "1"
     $env:VLLM_DISABLE_SCCACHE = "1"
     $env:VLLM_VERSION_OVERRIDE = $VersionOverride
+    $env:VLLM_BUILD_BASE = $BuildBase
 
     Initialize-RustBuildEnvironment -MsvcEnvironment $rustMsvcEnvironment
 
@@ -546,6 +593,8 @@ function Invoke-ConfigureOnly {
 }
 
 $tools = Set-BuildEnvironment
+Write-Host "Build profile: $buildProfile"
+Write-Host "Build base: $BuildBase"
 git -C $RepoRoot diff --check
 if ($LASTEXITCODE -ne 0) {
     throw "The source worktree has whitespace errors."
