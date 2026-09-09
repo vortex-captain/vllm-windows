@@ -8,11 +8,11 @@ import logging
 import multiprocessing
 import os
 import platform
-from shutil import which
 import signal
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from shutil import which
 
 import psutil
 
@@ -206,7 +206,8 @@ def decorate_logs(
 
 
 def kill_process_tree(pid: int):
-    """Kills all descendant processes of the given pid by sending SIGKILL.
+    """
+    Forcefully terminates the process and all of its descendants.
 
     Args:
         pid (int): Process ID of the parent process
@@ -220,19 +221,34 @@ def kill_process_tree(pid: int):
     # Get all children recursively
     children = parent.children(recursive=True)
 
-    # Send SIGKILL to all children first
-    for child in children:
-        with contextlib.suppress(ProcessLookupError):
-            logger.warning(
-                "[shutdown] force killing sub process %s pid %d",
-                child.name(),
-                child.pid,
-            )
-            os.kill(child.pid, signal.SIGKILL)
+    if sys.platform == "win32":
+        # signal.SIGKILL does not exist on Windows; psutil.kill() uses
+        # TerminateProcess and preserves the same forceful-shutdown semantics.
+        access_denied: psutil.AccessDenied | None = None
+        for process in [*children, parent]:
+            try:
+                process.kill()
+            except psutil.NoSuchProcess:
+                pass
+            except psutil.AccessDenied as exc:
+                if access_denied is None:
+                    access_denied = exc
+        if access_denied is not None:
+            raise access_denied
+    else:
+        # Send SIGKILL to all children first
+        for child in children:
+            with contextlib.suppress(ProcessLookupError):
+                logger.warning(
+                    "[shutdown] force killing sub process %s pid %d",
+                    child.name(),
+                    child.pid,
+                )
+                os.kill(child.pid, signal.SIGKILL)
 
-    # Finally kill the parent
-    with contextlib.suppress(ProcessLookupError):
-        os.kill(pid, signal.SIGKILL)
+        # Finally kill the parent
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
 
 
 # Resource utilities
