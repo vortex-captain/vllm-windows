@@ -1574,6 +1574,10 @@ rust_extensions = rust_build.rust_extensions(
     optional=not should_require_rust_frontend()
 )
 
+setup_options: dict[str, dict[str, str]] = {}
+if build_base := os.environ.get("VLLM_BUILD_BASE"):
+    setup_options["build"] = {"build_base": str(Path(build_base).resolve())}
+
 setup(
     # static metadata should rather go in pyproject.toml
     version=vllm_version,
@@ -1620,4 +1624,5 @@ setup(
     },
     cmdclass=cmdclass,
     package_data=package_data,
+    options=setup_options,
 )
