@@ -4,6 +4,7 @@
 import asyncio
 import signal
 import socket
+import sys
 from functools import partial
 from typing import Any
 
@@ -105,6 +106,8 @@ async def serve_http(
 
     loop.add_signal_handler(signal.SIGINT, signal_handler)
     loop.add_signal_handler(signal.SIGTERM, signal_handler)
+    if sys.platform == "win32":
+        loop.add_signal_handler(signal.SIGBREAK, signal_handler)
 
     async def handle_shutdown() -> None:
         await shutdown_event.wait()
