@@ -288,6 +288,8 @@ async def serve_http(
     try:
         loop.add_signal_handler(signal.SIGINT, signal_handler)
         loop.add_signal_handler(signal.SIGTERM, signal_handler)
+        if sys.platform == "win32":
+            loop.add_signal_handler(signal.SIGBREAK, signal_handler)
         shutdown_task = loop.create_task(handle_shutdown())
 
         await server_task
