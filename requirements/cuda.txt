@@ -9,7 +9,7 @@ torchaudio==2.11.0; sys_platform != "win32"
 torch==2.11.0+cu130; sys_platform == "win32" and platform_machine != "ARM64" and platform_machine != "arm64"
 torchaudio==2.11.0+cu130; sys_platform == "win32" and platform_machine != "ARM64" and platform_machine != "arm64"
 # These must be updated alongside torch
-torchvision==0.26.0; sys_platform != "win32" # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
+torchvision==0.28.0; sys_platform != "win32" # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
 torchvision==0.26.0+cu130; sys_platform == "win32" and platform_machine != "ARM64" and platform_machine != "arm64" # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
 torchcodec >= 0.14; platform_system != "Windows" or (platform_machine != "ARM64" and platform_machine != "arm64")
 PyNvVideoCodec==2.0.4; platform_system != "Windows" or (platform_machine != "ARM64" and platform_machine != "arm64")

@@ -23,7 +23,7 @@ def test_exact_family_arch_precedes_generic_family_fallback(tmp_path: Path):
     script.write_text(
         f"""
 cmake_minimum_required(VERSION 3.26)
-include("{repo_root / "cmake" / "utils.cmake"}")
+include([=[{repo_root / "cmake" / "utils.cmake"}]=])
 cuda_archs_loose_intersection(
   actual "10.0f;10.7f" "10.7")
 if(NOT "${{actual}}" STREQUAL "10.7f")
@@ -46,7 +46,7 @@ def test_extract_archs_prefers_sass_target_over_corrupted_virtual_arch(
     script.write_text(
         f"""
 cmake_minimum_required(VERSION 3.26)
-include("{repo_root / "cmake" / "utils.cmake"}")
+include([=[{repo_root / "cmake" / "utils.cmake"}]=])
 extract_unique_cuda_archs_ascending(actual
   "-gencode arch=compute_20,code=sm_121;\
 -gencode arch=compute_80,code=sm_80;\
@@ -66,7 +66,7 @@ def test_clear_cuda_gencode_flags(tmp_path: Path):
     script.write_text(
         f"""
 cmake_minimum_required(VERSION 3.26)
-include("{repo_root / "cmake" / "utils.cmake"}")
+include([=[{repo_root / "cmake" / "utils.cmake"}]=])
 set(CMAKE_CUDA_FLAGS "-Wall -gencode arch=compute_80,code=sm_80")
 clear_cuda_gencode_flags(CUDA_ARCH_FLAGS)
 if(NOT "${{CMAKE_CUDA_FLAGS}}" STREQUAL "-Wall ")

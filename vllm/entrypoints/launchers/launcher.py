@@ -6,7 +6,7 @@ import contextlib
 import signal
 import socket
 import sys
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from functools import partial
 from typing import Any
 
@@ -34,6 +34,20 @@ from .utils.constants import (
 )
 
 logger = init_logger(__name__)
+
+
+def _register_shutdown_signals(
+    loop: asyncio.AbstractEventLoop, callback: Callable[[], None]
+) -> dict[int, Any]:
+    previous_handlers = {}
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, callback)
+    if sys.platform == "win32":
+        loop.add_signal_handler(signal.SIGBREAK, callback)
+        # winloop 0.6.3 arms SIGINT only; NoSignalServer no longer arms the rest.
+        for sig in (signal.SIGTERM, signal.SIGBREAK):
+            previous_handlers[sig] = signal.signal(sig, lambda *_: None)
+    return previous_handlers
 
 
 class NoSignalServer(uvicorn.Server):
@@ -128,10 +142,7 @@ async def serve_http(
     async def dummy_shutdown() -> None:
         pass
 
-    loop.add_signal_handler(signal.SIGINT, signal_handler)
-    loop.add_signal_handler(signal.SIGTERM, signal_handler)
-    if sys.platform == "win32":
-        loop.add_signal_handler(signal.SIGBREAK, signal_handler)
+    previous_signal_handlers = _register_shutdown_signals(loop, signal_handler)
 
     async def handle_shutdown() -> None:
         await shutdown_event.wait()
@@ -178,6 +189,9 @@ async def serve_http(
     finally:
         shutdown_task.cancel()
         watchdog_task.cancel()
+        for sig, handler in previous_signal_handlers.items():
+            loop.remove_signal_handler(sig)
+            signal.signal(sig, handler)
 
 
 async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):

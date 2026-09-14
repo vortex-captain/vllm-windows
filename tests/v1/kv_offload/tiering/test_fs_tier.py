@@ -465,6 +465,20 @@ def test_wait_idle_blocks_until_tasks_complete():
         waiter.join(timeout=5.0)
 
 
+def test_batch_store_load_preserves_binary_bytes(tmp_path):
+    fs_io = pytest.importorskip("vllm.fs_io_C")
+    data = bytes(range(256)) * 16
+    temporary = str(tmp_path / "temporary.bin")
+    destination = tmp_path / "block.bin"
+
+    fs_io.batch_store_block([temporary], [str(destination)], [data], False)
+    assert destination.read_bytes() == data
+
+    output = bytearray(len(data))
+    fs_io.batch_load_block([str(destination)], [output], False)
+    assert output == data
+
+
 def test_batch_lookup_c_extension(tmp_path):
     """Validates batch_lookup_C: empty, single, all-existing, all-missing,
     mixed ordering, and input type validation."""

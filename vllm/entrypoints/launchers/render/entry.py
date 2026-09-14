@@ -99,7 +99,12 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-    import uvloop
+    import sys
+
+    if sys.platform == "win32":
+        import winloop as uvloop_impl
+    else:
+        import uvloop as uvloop_impl
 
     from vllm.entrypoints.serve.utils.api_utils import cli_env_setup
     from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -118,4 +123,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     validate_parsed_serve_args(args)
 
-    uvloop.run(run_launch_fastapi(args))
+    uvloop_impl.run(run_launch_fastapi(args))
