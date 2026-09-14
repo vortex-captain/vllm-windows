@@ -6,16 +6,22 @@
 #include <errno.h>
 #include <fcntl.h>
 #ifdef _WIN32
-#include <io.h>
-#define access _access
-#define F_OK 0
+  #include <io.h>
+  #define access _access
+  #define F_OK 0
 #else
-#include <unistd.h>
+  #include <unistd.h>
 #endif
 
 #include <filesystem>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+constexpr int kBinaryFlag = _O_BINARY;
+#else
+constexpr int kBinaryFlag = 0;
+#endif
 
 #if defined(O_DIRECT)
 constexpr int kODirectFlag = O_DIRECT;
@@ -54,8 +60,10 @@ inline int _store_block(const char* tmp_path, const char* dest_path,
   }
 
   const int o_direct_flag = use_o_direct ? kODirectFlag : 0;
-  const int fd = open(
-      tmp_path, O_CREAT | O_EXCL | O_WRONLY | O_TRUNC | o_direct_flag, 0644);
+  const int fd =
+      open(tmp_path,
+           O_CREAT | O_EXCL | O_WRONLY | O_TRUNC | o_direct_flag | kBinaryFlag,
+           0644);
   if (fd < 0) {
     return errno;
   }
@@ -93,7 +101,7 @@ inline int _store_block(const char* tmp_path, const char* dest_path,
 inline int _load_block(const char* source_path, char* dst, size_t size,
                        bool use_o_direct) {
   const int o_direct_flag = use_o_direct ? kODirectFlag : 0;
-  const int fd = open(source_path, O_RDONLY | o_direct_flag, 0);
+  const int fd = open(source_path, O_RDONLY | o_direct_flag | kBinaryFlag, 0);
   if (fd < 0) {
     return errno;
   }
