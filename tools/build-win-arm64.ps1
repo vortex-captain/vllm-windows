@@ -7,6 +7,8 @@ param(
     [string]$CudaPath = $env:CUDA_PATH,
     [string]$VisualStudioPath = "",
     [string]$MsvcToolsetVersion = "14.51.36231",
+    [string]$RustVisualStudioPath = "",
+    [string]$RustMsvcToolsetVersion = "14.44.35207",
     [string]$WindowsSdkVersion = "10.0.26100.0",
     [string]$CudaArchList = "12.0+PTX;10.3a",
     [string]$CMakeCudaArchitectures = "120-real;103-real",
@@ -28,6 +30,8 @@ param(
 # build, protobuf, Rust 1.95+, and a full Perl distribution for vendored
 # OpenSSL. Pass -PerlPath, -ProtocPath, and -ProtocIncludePath when they are not
 # discoverable; the include path must contain google\protobuf\struct.proto.
+# CUDA uses MsvcToolsetVersion; Rust/OpenSSL uses RustMsvcToolsetVersion to
+# avoid the optimized OpenSSL TLS crash observed with MSVC 14.51 on ARM64.
 #
 # Example:
 # uv pip install --python "<venv>\Scripts\python.exe" `
@@ -67,15 +71,20 @@ if (-not $ConfigureDir) {
 $ConfigureDir = [IO.Path]::GetFullPath($ConfigureDir)
 
 function Find-VcVarsAll {
-    if ($VisualStudioPath) {
-        if (Test-Path -LiteralPath $VisualStudioPath -PathType Leaf) {
-            return (Resolve-Path -LiteralPath $VisualStudioPath).Path
+    param(
+        [string]$ToolsetVersion,
+        [string]$RequestedVisualStudioPath
+    )
+
+    if ($RequestedVisualStudioPath) {
+        if (Test-Path -LiteralPath $RequestedVisualStudioPath -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $RequestedVisualStudioPath).Path
         }
-        $candidate = Join-Path $VisualStudioPath "VC\Auxiliary\Build\vcvarsall.bat"
+        $candidate = Join-Path $RequestedVisualStudioPath "VC\Auxiliary\Build\vcvarsall.bat"
         if (Test-Path -LiteralPath $candidate -PathType Leaf) {
             return (Resolve-Path -LiteralPath $candidate).Path
         }
-        throw "VisualStudioPath does not contain vcvarsall.bat: $VisualStudioPath"
+        throw "VisualStudioPath does not contain vcvarsall.bat: $RequestedVisualStudioPath"
     }
 
     $roots = @(
@@ -95,7 +104,7 @@ function Find-VcVarsAll {
                     )
                 )
                 Test-Path (
-                    Join-Path $installRoot "VC\Tools\MSVC\$MsvcToolsetVersion"
+                    Join-Path $installRoot "VC\Tools\MSVC\$ToolsetVersion"
                 )
             }
     }
@@ -104,18 +113,25 @@ function Find-VcVarsAll {
         Sort-Object FullName -Descending |
         Select-Object -First 1
     if (-not $selected) {
-        throw "Visual Studio ARM64 toolset $MsvcToolsetVersion was not found."
+        throw "Visual Studio ARM64 toolset $ToolsetVersion was not found."
     }
     return $selected.FullName
 }
 
-function Import-Arm64MsvcEnvironment {
-    $vcvars = Find-VcVarsAll
+function Get-Arm64MsvcEnvironment {
+    param(
+        [string]$ToolsetVersion,
+        [string]$RequestedVisualStudioPath
+    )
+
+    $vcvars = Find-VcVarsAll `
+        -ToolsetVersion $ToolsetVersion `
+        -RequestedVisualStudioPath $RequestedVisualStudioPath
     $installer = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer"
     $pathMarker = "__VLLM_VCVARS_PATH__="
     $command = (
         "set `"PATH=$installer;!PATH!`" && " +
-        "call `"$vcvars`" arm64 -vcvars_ver=$MsvcToolsetVersion >nul && " +
+        "call `"$vcvars`" arm64 -vcvars_ver=$ToolsetVersion >nul && " +
         "echo $pathMarker!PATH! && set"
     )
     $lines = & $env:ComSpec /d /v:on /s /c $command
@@ -124,6 +140,7 @@ function Import-Arm64MsvcEnvironment {
     }
 
     $vcvarsPath = $null
+    $environment = @{}
     foreach ($line in $lines) {
         if ($line.StartsWith($pathMarker, [StringComparison]::Ordinal)) {
             $vcvarsPath = $line.Substring($pathMarker.Length)
@@ -138,31 +155,44 @@ function Import-Arm64MsvcEnvironment {
         if ($name -ieq "Path") {
             continue
         }
-        [Environment]::SetEnvironmentVariable(
-            $name,
-            $value,
-            "Process"
-        )
+        $environment[$name] = $value
     }
 
     if (-not $vcvarsPath) {
         throw "vcvarsall.bat did not emit PATH."
     }
-    $env:PATH = $vcvarsPath
+    $environment["PATH"] = $vcvarsPath
 
-    $cl = Get-Command cl.exe -ErrorAction Stop
-    if ($cl.Source -notmatch "\\(HostARM64|Hostx64)\\arm64\\cl\.exe$") {
-        throw "MSVC is not targeting ARM64: $($cl.Source)"
+    $cl = $vcvarsPath.Split([IO.Path]::PathSeparator) |
+        Where-Object { $_ } |
+        ForEach-Object { Join-Path $_ "cl.exe" } |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+        Select-Object -First 1
+    if (-not $cl -or $cl -notmatch "\\(HostARM64|Hostx64)\\arm64\\cl\.exe$") {
+        throw "MSVC toolset $ToolsetVersion is not targeting ARM64: $cl"
     }
-    if ($cl.Source -notmatch "\\$([regex]::Escape($MsvcToolsetVersion))\\") {
-        throw "MSVC selected the wrong toolset: $($cl.Source)"
+    if ($cl -notmatch "\\$([regex]::Escape($ToolsetVersion))\\") {
+        throw "MSVC selected the wrong toolset: $cl"
     }
-    return $cl.Source
+    return $environment
+}
+
+function Import-Arm64MsvcEnvironment {
+    $environment = Get-Arm64MsvcEnvironment `
+        -ToolsetVersion $MsvcToolsetVersion `
+        -RequestedVisualStudioPath $VisualStudioPath
+    foreach ($entry in $environment.GetEnumerator()) {
+        [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, "Process")
+    }
+    return (Get-Command cl.exe -ErrorAction Stop).Source
 }
 
 function Initialize-RustBuildEnvironment {
+    param([hashtable]$MsvcEnvironment)
+
     if ($SkipBuild -or $SkipRustFrontend) {
         $env:VLLM_REQUIRE_RUST_FRONTEND = "0"
+        Remove-Item Env:\VLLM_RUST_BUILD_ENV_FILE -ErrorAction SilentlyContinue
         return
     }
 
@@ -239,6 +269,39 @@ function Initialize-RustBuildEnvironment {
     $env:PROTOC = (Resolve-Path -LiteralPath $resolvedProtoc).Path
     $env:PROTOC_INCLUDE = (Resolve-Path -LiteralPath $resolvedProtocInclude).Path
     $env:VLLM_REQUIRE_RUST_FRONTEND = "1"
+
+    $rustEnvironment = [ordered]@{}
+    $compilerVariables = @(
+        "COMMANDPROMPTTYPE", "DEVENVDIR", "EXTENSIONSDKDIR",
+        "FRAMEWORKDIR", "FRAMEWORKDIR32", "FRAMEWORKVERSION",
+        "FRAMEWORKVERSION32", "INCLUDE", "LIB", "LIBPATH", "NETFXSDKDIR",
+        "PATH", "PLATFORM", "PREFERREDTOOLARCHITECTURE",
+        "UCRTVERSION", "UNIVERSALCRTSDKDIR", "VCINSTALLDIR",
+        "VCTOOLSINSTALLDIR", "VCTOOLSREDISTDIR", "VCTOOLSVERSION",
+        "VISUALSTUDIOVERSION", "VSINSTALLDIR", "VSCMD_ARG_APP_PLAT",
+        "VSCMD_ARG_HOST_ARCH", "VSCMD_ARG_TGT_ARCH", "VSCMD_ARG_VCVARS_VER",
+        "VSCMD_VER", "WINDOWSLIBPATH", "WINDOWSSDKBINPATH",
+        "WINDOWSSDKDIR", "WINDOWSSDKLIBVERSION", "WINDOWSSDKVERSION"
+    )
+    foreach ($name in $compilerVariables) {
+        if ($MsvcEnvironment[$name]) {
+            $rustEnvironment[$name] = $MsvcEnvironment[$name]
+        }
+    }
+    $rustEnvironment["PATH"] = (
+        (Split-Path -Parent $cargo.Source),
+        (Split-Path -Parent $resolvedPerl),
+        $rustEnvironment["PATH"]
+    ) -join [IO.Path]::PathSeparator
+
+    $rustEnvironmentPath = Join-Path $BuildBase "rust-msvc-environment.json"
+    [void][IO.Directory]::CreateDirectory($BuildBase)
+    [IO.File]::WriteAllText(
+        $rustEnvironmentPath,
+        ($rustEnvironment | ConvertTo-Json),
+        [Text.UTF8Encoding]::new($false)
+    )
+    $env:VLLM_RUST_BUILD_ENV_FILE = $rustEnvironmentPath
 }
 
 function Initialize-CudaIncludeOverlay {
@@ -329,6 +392,12 @@ function Set-BuildEnvironment {
         "Library\bin\ninja.exe"
     )
 
+    $rustMsvcEnvironment = $null
+    if (-not $SkipBuild -and -not $SkipRustFrontend) {
+        $rustMsvcEnvironment = Get-Arm64MsvcEnvironment `
+            -ToolsetVersion $RustMsvcToolsetVersion `
+            -RequestedVisualStudioPath $RustVisualStudioPath
+    }
     $cl = Import-Arm64MsvcEnvironment
     $vsToolsetRoot = Split-Path -Parent (
         Split-Path -Parent (
@@ -405,7 +474,7 @@ function Set-BuildEnvironment {
     $env:VLLM_VERSION_OVERRIDE = $VersionOverride
     $env:VLLM_BUILD_BASE = $BuildBase
 
-    Initialize-RustBuildEnvironment
+    Initialize-RustBuildEnvironment -MsvcEnvironment $rustMsvcEnvironment
 
     Initialize-CudaIncludeOverlay
 
