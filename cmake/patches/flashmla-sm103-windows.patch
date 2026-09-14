@@ -250,27 +250,35 @@ index e488007..b6fa417 100644
 +>;
 +
 diff --git a/csrc/sm100/prefill/sparse/fwd_for_small_topk/head128/phase1.cuh b/csrc/sm100/prefill/sparse/fwd_for_small_topk/head128/phase1.cuh
-index 388abc8776bc9dcbc724ec44a66914e119210178..f9dcc76f59e11be9195d3f923362c8d49897cb21 100644
-GIT binary patch
-delta 400
-zcmZqP%RF;0^M;?=GDWGGc_pbu1x2YP@yUtBB{pd}`H3YaT6P-w@skbnWG5@s3r+q%
-zLuj&}iT31L6Yt3Z<t&rqtxYEfNV7~{Yi>9>Hb{K4v+g=JNt`Ba{%0(tA(UNeWd*d#
-z(8wabL_sYju_STwK_i990VP1=HgQd^F_r}z`Cuo@<ijzdlP9Jqg7|7i3R(&pIr+(n
-zIq^mL<?)#*6+i*MP~Uj>Apg*SU?9iLL_r&>oKqU2GC4m7s?sSw#6Q3rtZMQ_V|kE~
-zEMU7ACP+^{P%1K6AysfPKeyy&_PDw1FiR)<C(BHJvRZ8NhhzaYEewAl`ve$HAmczm
-pB?B~^W3qvz*yI3Xwn;NZCr|KUo$PNSx!FC<$_G#A^lkd84FE%-jsO4v
-
-delta 493
-zcmbQam$`W_^M;?=!W!}MnRz9KMi%iUTAKOsNoj^=lNXk2PCl?ncyfk`_T=d%-jg2~
-zux!4dqt7miqF5teL0chH%VhFLN9oB6+{D0I0;E|sXP6vPXNr%XtQVtal31LpP?n#Q
-zSdy8Os-U4%T%uQ=nwYIuoRL_Rnqp;@T#~4l1hiZsTGb#{M?uxlIwntP@&-R8Mk^4>
-zW~HE1q@*#qJ4P~A!AMIZCqFqcC%!1ZJU%m}Ld!4IH{LzSKQtg%%ghAm7Km(eehygH
-zDL%wMz#Ax|si~u&RH&qpl30?csi2^sudiUFkd|MhP@GwnnxCct_A=vixmZnWuw;0u
-zLPla)szOOdX0bv7vIi0rGE$3DbrkYTfOL6gF-T3SLUMj?0nm3v3hAkNsYQt;sl^Jx
-zA$qO~nR&$}sfj5H`Ds9Y@MJ?vsmXt*i%$lI(BuaioRj&vB`5En=R3K6vB+l8I2-oK
-zf0AS*briHv!WiUcNSu7Ek_Kxvm?{MgXbxcfNNo;Gv+_ZUmtttVC_0F2KCtPgHUR0y
-BrE>rP
-
+index 6f89d9c..26f7713 100644
+--- a/csrc/sm100/prefill/sparse/fwd_for_small_topk/head128/phase1.cuh
++++ b/csrc/sm100/prefill/sparse/fwd_for_small_topk/head128/phase1.cuh
+@@ -250 +250 @@ KernelTemplate<FWD_MODE, D_QK>::sparse_attn_fwd_kernel_devfunc(const ArgT &param
+-                        ku::st_shared(o_do_addr, *(__int128_t*)o_bf16);
++                        ku::st_shared(o_do_addr, *reinterpret_cast<float4*>(o_bf16));
+@@ -292 +292 @@ KernelTemplate<FWD_MODE, D_QK>::sparse_attn_fwd_kernel_devfunc(const ArgT &param
+-                            *(__int128_t*)(o + i*4)
++                            *reinterpret_cast<float4*>(o + i*4)
+@@ -477,5 +477,6 @@ KernelTemplate<FWD_MODE, D_QK>::sparse_attn_fwd_kernel_devfunc(const ArgT &param
+-                        auto st_128b = [&](int local_row_idx, int local_col_idx, __int128_t &data) {
+-                            asm volatile ("st.weak.shared::cta.b128 [%0], %1;\n" 
+-                                : 
+-                                : "r"(cur_nope_base_uint_addr + 2*(local_row_idx*NUM_GROUPS*64 + local_col_idx*B_TOPK*64)), "q"(data)   // 2 for sizeof(bf16)
+-                            );  // We have this `asm volatile` here, otherwise the compiler generates ST.E instead of STS
++                        auto st_128b = [&](int local_row_idx, int local_col_idx, ku::int128_t &data) {
++                            ku::st_shared(
++                                cur_nope_base_uint_addr +
++                                    2 * (local_row_idx * NUM_GROUPS * 64 +
++                                         local_col_idx * B_TOPK * 64),
++                                data);
+@@ -512 +513,3 @@ KernelTemplate<FWD_MODE, D_QK>::sparse_attn_fwd_kernel_devfunc(const ArgT &param
+-                                st_128b(local_row_idx, local_col_idx, *(__int128_t*)data_bf16);
++                                st_128b(
++                                    local_row_idx, local_col_idx,
++                                    *reinterpret_cast<ku::int128_t*>(data_bf16));
+@@ -861 +864 @@ KernelTemplate<FWD_MODE, D_QK>::sparse_attn_fwd_kernel_devfunc(const ArgT &param
+-                    ku::st_shared(sS_base + i*8*(H_Q/2), *(__int128_t*)(s + i*4));
++                    ku::st_shared(sS_base + i*8*(H_Q/2), *reinterpret_cast<float4*>(s + i*4));
 diff --git a/csrc/sm90/decode/dense/splitkv_mla.cuh b/csrc/sm90/decode/dense/splitkv_mla.cuh
 index cdd5441..3151b19 100644
 --- a/csrc/sm90/decode/dense/splitkv_mla.cuh
