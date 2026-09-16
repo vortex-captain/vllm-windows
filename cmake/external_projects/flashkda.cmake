@@ -20,6 +20,13 @@ else()
 endif()
 
 FetchContent_MakeAvailable(flashkda)
+if(WIN32)
+  execute_process(
+    COMMAND "${Python_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/../../fix_cutlass_msvc.py"
+            "${flashkda_SOURCE_DIR}/cutlass"
+    COMMAND_ERROR_IS_FATAL ANY)
+endif()
 message(STATUS "FlashKDA is available at ${flashkda_SOURCE_DIR}")
 
 set(FLASH_KDA_SUPPORT_ARCHS)
@@ -69,9 +76,13 @@ if(FLASH_KDA_ARCHS)
     target_compile_definitions(_flashkda_C PRIVATE USE_CUDA)
   endif()
 
+  if(NOT WIN32)
+    target_compile_options(_flashkda_C PRIVATE
+      $<$<COMPILE_LANGUAGE:CXX,CUDA>:-UPy_LIMITED_API>)
+  endif()
+
   target_compile_options(_flashkda_C PRIVATE
-    $<$<COMPILE_LANGUAGE:CUDA>:-UPy_LIMITED_API --expt-relaxed-constexpr --expt-extended-lambda --use_fast_math -O3>
-    $<$<COMPILE_LANGUAGE:CXX>:-UPy_LIMITED_API>)
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --expt-extended-lambda --use_fast_math -O3>)
 else()
   message(STATUS
     "FlashKDA will not compile: CUDA >=12.0 and a supported architecture "
