@@ -9,6 +9,7 @@ import os
 import platform
 import signal
 import sys
+import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from shutil import which
@@ -253,6 +254,126 @@ def decorate_logs(
     pid = os.getpid()
     _add_prefix(sys.stdout, process_name, pid)
     _add_prefix(sys.stderr, process_name, pid)
+
+
+def watch_parent_process(
+    on_parent_exit: Callable[[], None], *, name: str = "ParentProcessWatchdog"
+) -> threading.Thread | None:
+    """Run ``on_parent_exit`` from a daemon thread once the parent process exits.
+
+    Uses ``multiprocessing.parent_process().sentinel`` so it works for spawn,
+    forkserver and fork children on every platform and needs no
+    ``PR_SET_PDEATHSIG``. Returns ``None`` when the caller is not a
+    multiprocessing child.
+    """
+    from multiprocessing import connection
+
+    parent = multiprocessing.parent_process()
+    if parent is None:
+        return None
+
+    def _watch() -> None:
+        with contextlib.suppress(Exception):
+            connection.wait([parent.sentinel])
+        on_parent_exit()
+
+    thread = threading.Thread(target=_watch, daemon=True, name=name)
+    thread.start()
+    return thread
+
+
+# Job handles kept for the lifetime of this process: closing the last handle
+# (which the OS does when this process dies for any reason) terminates every
+# process assigned to the job, including their descendants.
+_KILL_ON_CLOSE_JOB_HANDLES: list[int] = []
+
+
+def assign_to_kill_on_close_job(pid: int) -> bool:
+    """Windows only: put ``pid`` into a Job Object flagged
+    ``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE``, so the child cannot outlive this
+    process even when this process is terminated without running finalizers
+    (TerminateProcess, closed console, taskkill without /T).
+
+    Returns ``True`` on success and ``False`` (after logging) when the OS
+    refuses, e.g. when this process already runs in a job that forbids
+    nested jobs; the caller keeps working without the guarantee.
+    """
+    if sys.platform != "win32":
+        return False
+    import ctypes
+    import ctypes.wintypes as wt
+
+    k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+    JobObjectExtendedLimitInformation = 9
+    PROCESS_SET_QUOTA, PROCESS_TERMINATE = 0x0100, 0x0001
+
+    class IO_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            (n, ctypes.c_ulonglong)
+            for n in (
+                "ReadOperationCount",
+                "WriteOperationCount",
+                "OtherOperationCount",
+                "ReadTransferCount",
+                "WriteTransferCount",
+                "OtherTransferCount",
+            )
+        ]
+
+    class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wt.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wt.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wt.DWORD),
+            ("SchedulingClass", wt.DWORD),
+        ]
+
+    class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+            ("IoInfo", IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    job = k32.CreateJobObjectW(None, None)
+    if not job:
+        logger.warning(
+            "CreateJobObject failed (%d); child %d not job-bound",
+            ctypes.get_last_error(),
+            pid,
+        )
+        return False
+    info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    ok = k32.SetInformationJobObject(
+        job, JobObjectExtendedLimitInformation, ctypes.byref(info), ctypes.sizeof(info)
+    )
+    handle = 0
+    if ok:
+        handle = k32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, pid)
+    if handle:
+        ok = k32.AssignProcessToJobObject(job, handle)
+        k32.CloseHandle(handle)
+    if not (ok and handle):
+        logger.warning(
+            "Child %d not bound to a kill-on-close job (error %d); "
+            "it may outlive this process if this process is killed hard",
+            pid,
+            ctypes.get_last_error(),
+        )
+        k32.CloseHandle(job)
+        return False
+    _KILL_ON_CLOSE_JOB_HANDLES.append(job)
+    return True
 
 
 def kill_process_tree(pid: int):
