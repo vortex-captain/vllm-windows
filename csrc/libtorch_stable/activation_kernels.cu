@@ -1008,48 +1008,48 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
                     "situ_and_mul_quant: scale shape must be "
                     "[num_tokens, d/group_size]");
     dim3 grid(GRID_DIM);
+    // MSVC requires preprocessor directives outside dispatch macro arguments.
+    auto launch = [&]<typename scalar_t, typename fp8_t>() {
+#ifndef USE_ROCM
+      // The pipelined kernel's float2-per-lane geometry assumes a
+      // 32-lane warp (GROUP_SIZE == 4 * WARP_SIZE); on HIP (64-lane)
+      // fall back to the WARP_SIZE-generic scalar kernel.
+      constexpr int THREADS = 256;
+      constexpr int SITU_D = 3072;  // Kimi-K3 fused w2 input dim
+      if constexpr (sizeof(scalar_t) == 2) {
+        if (d == SITU_D && (float)beta == vllm::SITU_BETA &&
+            (float)linear_beta == vllm::SITU_LINEAR_BETA) {
+          constexpr int D = SITU_D;
+          constexpr int GROUP_STAGES = 4;
+          constexpr int NUM_WARPS = THREADS / 32;
+          constexpr int STAGE_ELTS = 2 * 128;
+          dim3 block(THREADS);
+          size_t smem_bytes =
+              (size_t)NUM_WARPS * GROUP_STAGES * STAGE_ELTS * sizeof(scalar_t);
+          vllm::situ_and_mul_quant_group_pipelined_kernel<
+              scalar_t, fp8_t, THREADS, GROUP_STAGES, 128, GRID_DIM, D>
+              <<<grid, block, smem_bytes, stream>>>(
+                  out.mutable_data_ptr<fp8_t>(),
+                  scale.mutable_data_ptr<float>(),
+                  input.const_data_ptr<scalar_t>(), num_tokens, valid_rows_ptr,
+                  topk);
+          return;
+        }
+      }
+#endif
+      const int num_warps = std::min(num_groups, 1024 / WARP_SIZE);
+      dim3 block(num_warps * WARP_SIZE);
+      vllm::situ_and_mul_quant_group_scalar_kernel<scalar_t, fp8_t, 128>
+          <<<grid, block, 0, stream>>>(
+              out.mutable_data_ptr<fp8_t>(), scale.mutable_data_ptr<float>(),
+              input.const_data_ptr<scalar_t>(), d, num_groups, (float)beta,
+              (float)linear_beta, num_tokens, valid_rows_ptr, topk);
+    };
     VLLM_STABLE_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "situ_and_mul_quant_group_kernel", [&] {
           VLLM_STABLE_DISPATCH_FP8_TYPES(
-              out.scalar_type(), "situ_and_mul_quant_group_kernel_fp8", [&] {
-#ifndef USE_ROCM
-                // The pipelined kernel's float2-per-lane geometry assumes a
-                // 32-lane warp (GROUP_SIZE == 4 * WARP_SIZE); on HIP (64-lane)
-                // fall back to the WARP_SIZE-generic scalar kernel.
-                constexpr int THREADS = 256;
-                constexpr int SITU_D = 3072;  // Kimi-K3 fused w2 input dim
-                if constexpr (sizeof(scalar_t) == 2) {
-                  if (d == SITU_D && (float)beta == vllm::SITU_BETA &&
-                      (float)linear_beta == vllm::SITU_LINEAR_BETA) {
-                    constexpr int D = SITU_D;
-                    constexpr int GROUP_STAGES = 4;
-                    constexpr int NUM_WARPS = THREADS / 32;
-                    constexpr int STAGE_ELTS = 2 * 128;
-                    dim3 block(THREADS);
-                    size_t smem_bytes = (size_t)NUM_WARPS * GROUP_STAGES *
-                                        STAGE_ELTS * sizeof(scalar_t);
-                    vllm::situ_and_mul_quant_group_pipelined_kernel<
-                        scalar_t, fp8_t, THREADS, GROUP_STAGES, 128, GRID_DIM,
-                        D><<<grid, block, smem_bytes, stream>>>(
-                        out.mutable_data_ptr<fp8_t>(),
-                        scale.mutable_data_ptr<float>(),
-                        input.const_data_ptr<scalar_t>(), num_tokens,
-                        valid_rows_ptr, topk);
-                    return;
-                  }
-                }
-#endif
-                const int num_warps = std::min(num_groups, 1024 / WARP_SIZE);
-                dim3 block(num_warps * WARP_SIZE);
-                vllm::situ_and_mul_quant_group_scalar_kernel<scalar_t, fp8_t,
-                                                             128>
-                    <<<grid, block, 0, stream>>>(
-                        out.mutable_data_ptr<fp8_t>(),
-                        scale.mutable_data_ptr<float>(),
-                        input.const_data_ptr<scalar_t>(), d, num_groups,
-                        (float)beta, (float)linear_beta, num_tokens,
-                        valid_rows_ptr, topk);
-              });
+              out.scalar_type(), "situ_and_mul_quant_group_kernel_fp8",
+              launch.operator()<scalar_t, fp8_t>);
         });
   }
 }
