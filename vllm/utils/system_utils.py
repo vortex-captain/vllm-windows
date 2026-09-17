@@ -303,7 +303,9 @@ def assign_to_kill_on_close_job(pid: int) -> bool:
     import ctypes
     import ctypes.wintypes as wt
 
-    k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    # use_last_error=True so ctypes.get_last_error() reports this call's
+    # GetLastError, not a stale value.
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
     JobObjectExtendedLimitInformation = 9
     PROCESS_SET_QUOTA, PROCESS_TERMINATE = 0x0100, 0x0001
@@ -343,6 +345,24 @@ def assign_to_kill_on_close_job(pid: int) -> bool:
             ("PeakProcessMemoryUsed", ctypes.c_size_t),
             ("PeakJobMemoryUsed", ctypes.c_size_t),
         ]
+
+    # Declare the Win32 signatures: HANDLE is pointer-sized, and the ctypes
+    # default return type (c_int) would truncate it on 64-bit Windows.
+    k32.CreateJobObjectW.restype = wt.HANDLE
+    k32.CreateJobObjectW.argtypes = [wt.LPVOID, wt.LPCWSTR]
+    k32.SetInformationJobObject.restype = wt.BOOL
+    k32.SetInformationJobObject.argtypes = [
+        wt.HANDLE,
+        ctypes.c_int,
+        ctypes.POINTER(JOBOBJECT_EXTENDED_LIMIT_INFORMATION),
+        wt.DWORD,
+    ]
+    k32.OpenProcess.restype = wt.HANDLE
+    k32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+    k32.AssignProcessToJobObject.restype = wt.BOOL
+    k32.AssignProcessToJobObject.argtypes = [wt.HANDLE, wt.HANDLE]
+    k32.CloseHandle.restype = wt.BOOL
+    k32.CloseHandle.argtypes = [wt.HANDLE]
 
     job = k32.CreateJobObjectW(None, None)
     if not job:
