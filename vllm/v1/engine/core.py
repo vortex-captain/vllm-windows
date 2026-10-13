@@ -43,7 +43,11 @@ from vllm.utils.gc_utils import (
 )
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
-from vllm.utils.system_utils import decorate_logs, set_process_title
+from vllm.utils.system_utils import (
+    decorate_logs,
+    set_process_title,
+    watch_parent_process,
+)
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -1356,6 +1360,22 @@ class EngineCoreProc(EngineCore):
 
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
+
+            def on_parent_exit():
+                # The front-end died without shutting us down (killed hard,
+                # crashed, console closed). Request the normal shutdown, then
+                # hard-exit if the busy loop does not come back in time, so
+                # that this process never lingers holding the GPU.
+                logger.warning(
+                    "[shutdown] EngineCore: parent process exited, shutting down"
+                )
+                engine_core.shutdown_state = EngineShutdownState.REQUESTED
+                signal_callback.trigger()
+                time.sleep(max(vllm_config.shutdown_timeout, 1) + 10)
+                logger.error("[shutdown] EngineCore: busy loop did not exit, forcing")
+                os._exit(1)
+
+            watch_parent_process(on_parent_exit)
 
             engine_core.run_busy_loop()
 

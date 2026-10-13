@@ -5,6 +5,7 @@ import contextlib
 import os
 import threading
 import platform
+import sys
 import weakref
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -29,7 +30,10 @@ from vllm.utils.network_utils import (
     get_tcp_uri,
     zmq_socket_ctx,
 )
-from vllm.utils.system_utils import get_mp_context
+from vllm.utils.system_utils import (
+    assign_to_kill_on_close_job,
+    get_mp_context,
+)
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
 from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
@@ -234,6 +238,11 @@ class CoreEngineProcManager:
                     process_kind="EngineCore",
                 ):
                     proc.start()
+                if sys.platform == "win32" and proc.pid is not None:
+                    # Windows has no process groups to kill on parent death;
+                    # a kill-on-close job object makes the EngineCore (and the
+                    # workers it spawns) die with this process.
+                    assign_to_kill_on_close_job(proc.pid)
         finally:
             # Kill other procs if not all are running.
             if self.finished_procs():
