@@ -8,9 +8,14 @@
 //! `axum::serve(...)` through a single type.
 
 use std::io::Result;
-use std::net::{SocketAddr, TcpListener as StdTcpListener};
+use std::net::SocketAddr;
+use std::net::TcpListener as StdTcpListener;
+#[cfg(unix)]
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+#[cfg(unix)]
 use std::os::unix::net::UnixListener as StdUnixListener;
+#[cfg(windows)]
+use std::os::windows::io::{FromRawSocket, IntoRawSocket};
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
@@ -18,9 +23,13 @@ use auto_enums::enum_derive;
 use openssl::ssl::SslContext;
 use socket2::Socket;
 use tls_listener::{AsyncAccept, AsyncListener};
-use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
+use tokio::net::{TcpListener, TcpStream};
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
 use tonic::transport::server::{Connected, TcpConnectInfo};
 use tracing::trace;
+#[cfg(windows)]
+use windows_sys::Win32::Networking::WinSock::SOMAXCONN;
 
 use crate::{HttpListenerMode, tls};
 
@@ -29,10 +38,12 @@ use crate::{HttpListenerMode, tls};
 #[derive(Debug)]
 pub enum Listener {
     Tcp(TcpListener),
+    #[cfg(unix)]
     Unix(UnixListener),
 }
 
 /// Runtime listener I/O type which is either a TCP stream or a Unix-domain stream.
+#[cfg(unix)]
 #[derive(Debug)]
 #[enum_derive(tokio1::AsyncRead, tokio1::AsyncWrite)]
 pub enum ListenerIo {
@@ -40,11 +51,19 @@ pub enum ListenerIo {
     Unix(UnixStream),
 }
 
+#[cfg(not(unix))]
+#[derive(Debug)]
+#[enum_derive(tokio1::AsyncRead, tokio1::AsyncWrite)]
+pub enum ListenerIo {
+    Tcp(TcpStream),
+}
+
 /// Runtime listener address type which is either a TCP address or a Unix-domain address.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum ListenerAddr {
     Tcp(SocketAddr),
+    #[cfg(unix)]
     Unix(tokio::net::unix::SocketAddr),
 }
 
@@ -58,8 +77,38 @@ impl Listener {
             HttpListenerMode::BindTcp { host, port } => {
                 Ok(Self::Tcp(TcpListener::bind((host.as_str(), *port)).await?))
             }
-            HttpListenerMode::BindUnix { path } => Ok(Self::Unix(UnixListener::bind(path)?)),
-            HttpListenerMode::InheritedFd { fd } => Self::from_inherited_fd(*fd),
+            HttpListenerMode::BindUnix { path } => {
+                #[cfg(unix)]
+                {
+                    Ok(Self::Unix(UnixListener::bind(path)?))
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = path;
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "Unix listeners are not supported on this platform",
+                    ))
+                }
+            }
+            HttpListenerMode::InheritedFd { fd } => {
+                #[cfg(unix)]
+                {
+                    Self::from_inherited_fd(*fd)
+                }
+                #[cfg(windows)]
+                {
+                    Self::from_inherited_socket(*fd)
+                }
+                #[cfg(not(any(unix, windows)))]
+                {
+                    let _ = fd;
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "inherited file-descriptor listeners are not supported on this platform",
+                    ))
+                }
+            }
         }
     }
 
@@ -68,6 +117,7 @@ impl Listener {
     pub fn local_addr_display(&self) -> Result<String> {
         match self {
             Self::Tcp(listener) => Ok(listener.local_addr()?.to_string()),
+            #[cfg(unix)]
             Self::Unix(listener) => Ok(match listener.local_addr()?.as_pathname() {
                 Some(path) => format!("unix:{}", path.display()),
                 None => "unix:<unnamed>".to_string(),
@@ -75,7 +125,14 @@ impl Listener {
         }
     }
 
-    fn from_inherited_fd(fd: i32) -> Result<Self> {
+    #[cfg(unix)]
+    fn from_inherited_fd(fd: u64) -> Result<Self> {
+        let fd = i32::try_from(fd).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "inherited file descriptor is out of range",
+            )
+        })?;
         // SAFETY: We trust the caller to only pass valid listener fds, and we only use
         // this fd once to create a single listener.
         let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -96,9 +153,28 @@ impl Listener {
         }
     }
 
+    #[cfg(windows)]
+    fn from_inherited_socket(socket: u64) -> Result<Self> {
+        // SAFETY: The Python supervisor explicitly inherits this socket into the child,
+        // which transfers ownership of the child process's handle to this listener.
+        let socket = unsafe { Socket::from_raw_socket(socket) };
+        if socket.local_addr()?.as_socket().is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "only inherited TCP listeners are supported on Windows",
+            ));
+        }
+        socket.listen(SOMAXCONN.try_into().expect("SOMAXCONN must fit in c_int"))?;
+        socket.set_nonblocking(true)?;
+
+        let std_listener = unsafe { StdTcpListener::from_raw_socket(socket.into_raw_socket()) };
+        Ok(Self::Tcp(TcpListener::from_std(std_listener)?))
+    }
+
     fn local_addr(&self) -> Result<ListenerAddr> {
         match self {
             Self::Tcp(listener) => listener.local_addr().map(ListenerAddr::Tcp),
+            #[cfg(unix)]
             Self::Unix(listener) => listener.local_addr().map(ListenerAddr::Unix),
         }
     }
@@ -111,6 +187,7 @@ impl Connected for ListenerIo {
     fn connect_info(&self) -> TcpConnectInfo {
         match self {
             Self::Tcp(stream) => stream.connect_info(),
+            #[cfg(unix)]
             Self::Unix(_) => TcpConnectInfo {
                 local_addr: None,
                 remote_addr: None,
@@ -141,6 +218,7 @@ impl axum::serve::Listener for Listener {
                     ListenerAddr::Tcp(addr),
                 )
             }
+            #[cfg(unix)]
             Self::Unix(listener) => {
                 let (io, addr) = axum::serve::Listener::accept(listener).await;
                 (ListenerIo::Unix(io), ListenerAddr::Unix(addr))
@@ -171,6 +249,7 @@ impl AsyncAccept for Listener {
                     ListenerAddr::Tcp(addr),
                 )))
             }
+            #[cfg(unix)]
             Self::Unix(listener) => {
                 let (io, addr) = ready!(listener.poll_accept(cx))?;
                 Poll::Ready(Ok((ListenerIo::Unix(io), ListenerAddr::Unix(addr))))
@@ -273,7 +352,7 @@ impl futures::Stream for MaybeTlsListener {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::os::fd::IntoRawFd;
@@ -290,7 +369,11 @@ mod tests {
         socket.bind(&SockAddr::from(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))).unwrap();
         let fd = socket.into_raw_fd();
 
-        let listener = Listener::bind(&HttpListenerMode::InheritedFd { fd }).await.unwrap();
+        let listener = Listener::bind(&HttpListenerMode::InheritedFd {
+            fd: fd.try_into().unwrap(),
+        })
+        .await
+        .unwrap();
 
         assert!(matches!(listener, Listener::Tcp(_)));
     }
@@ -302,9 +385,35 @@ mod tests {
         socket.bind(&SockAddr::unix(&path).unwrap()).unwrap();
         let fd = socket.into_raw_fd();
 
-        let listener = Listener::bind(&HttpListenerMode::InheritedFd { fd }).await.unwrap();
+        let listener = Listener::bind(&HttpListenerMode::InheritedFd {
+            fd: fd.try_into().unwrap(),
+        })
+        .await
+        .unwrap();
 
         assert!(matches!(listener, Listener::Unix(_)));
         let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::os::windows::io::IntoRawSocket;
+
+    use socket2::{Domain, SockAddr, Socket, Type};
+
+    use super::Listener;
+    use crate::HttpListenerMode;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inherited_socket_adopts_tcp_listener() {
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+        socket.bind(&SockAddr::from(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))).unwrap();
+        let socket = socket.into_raw_socket();
+
+        let listener = Listener::bind(&HttpListenerMode::InheritedFd { fd: socket }).await.unwrap();
+
+        assert!(matches!(listener, Listener::Tcp(_)));
     }
 }

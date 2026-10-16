@@ -8,10 +8,11 @@ endif()
 # Set TRITON_KERNELS_SRC_DIR for use with local development with vLLM. We expect TRITON_KERNELS_SRC_DIR to
 # be directly set to the triton_kernels python directory.
 if (DEFINED ENV{TRITON_KERNELS_SRC_DIR})
-  message(STATUS "[triton_kernels] Fetch from $ENV{TRITON_KERNELS_SRC_DIR}")
+  file(TO_CMAKE_PATH "$ENV{TRITON_KERNELS_SRC_DIR}" TRITON_KERNELS_LOCAL_SOURCE_DIR)
+  message(STATUS "[triton_kernels] Fetch from ${TRITON_KERNELS_LOCAL_SOURCE_DIR}")
   FetchContent_Declare(
           triton_kernels
-          SOURCE_DIR $ENV{TRITON_KERNELS_SRC_DIR}
+          SOURCE_DIR ${TRITON_KERNELS_LOCAL_SOURCE_DIR}
   )
 
 else()

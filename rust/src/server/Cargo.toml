@@ -55,6 +55,9 @@ vllm-metrics.workspace = true
 vllm-proto.workspace = true
 vllm-text.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Networking_WinSock"] }
+
 [dev-dependencies]
 anyhow.workspace = true
 async-openai = { workspace = true, features = ["full"] }

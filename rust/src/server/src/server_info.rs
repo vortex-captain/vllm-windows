@@ -139,8 +139,6 @@ fn collect_system_env() -> BTreeMap<String, String> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::os::fd::IntoRawFd;
-    use std::os::unix::net::UnixListener;
     use std::time::Duration;
 
     use serde_json::{Value, json};
@@ -174,16 +172,14 @@ mod tests {
             },
         });
         let ipc = IpcNamespace::new().expect("create ipc namespace");
-        let input_address = ipc.input_endpoint();
-        let output_address = ipc.output_endpoint();
-        let listener_fd = |address: &str| {
-            let path = address.strip_prefix("ipc://").expect("IPC test endpoint");
-            UnixListener::bind(path).expect("bind inherited test listener").into_raw_fd()
-        };
+        let (input_address, input_listener_fd) =
+            ipc.bind_inherited_listener("input.sock").expect("bind inherited input listener");
+        let (output_address, output_listener_fd) =
+            ipc.bind_inherited_listener("output.sock").expect("bind inherited output listener");
         let client_task = tokio::spawn(EngineCoreClient::connect(EngineCoreClientConfig {
             transport_mode: TransportMode::Bootstrapped {
-                input_listener_fd: listener_fd(&input_address),
-                output_listener_fd: listener_fd(&output_address),
+                input_listener_fd,
+                output_listener_fd,
                 engine_start_index: 4,
                 engine_count: 2,
                 data_parallel_size: 8,

@@ -66,6 +66,7 @@ mimalloc = "0.1.52"
 minijinja = { version = "2.24", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order", "fuel"] }
 minijinja-contrib = { version = "2.24", features = ["pycompat"] }
 native-tls-vendored = { package = "native-tls", version = "0.2.18", features = ["vendored"] }
+openssl-vendored = { package = "openssl", version = "0.10.81", features = ["vendored"] }
 ndarray = { version = "0.17", features = ["serde"] }
 openai-harmony = { package = "oss-harmony", git = "https://github.com/oss-harmony/harmony", tag = "v0.0.11", default-features = false }
 openai-protocol = "1.6.0"
@@ -154,6 +155,7 @@ vllm-text = { path = "src/text" }
 vllm-tokenizer = { path = "src/tokenizer" }
 vllm-tracing = { path = "src/tracing" }
 winnow = { version = "1.0.2", features = ["simd"] }
+windows-sys = "0.61.2"
 xgrammar-structural-tag = "0.4.1"
 zeromq = { git = "https://github.com/zeromq/zmq.rs", rev = "67dcba97559ebe8e8206dab753710d8b9cb07591", default-features = false, features = [
     "tokio-runtime",
