@@ -453,6 +453,7 @@ where
         // Expose the TCP peer to handlers, as `ConnectInfo` does for `axum::serve`.
         let peer = match addr {
             ListenerAddr::Tcp(addr) => Some(ConnectInfo(addr)),
+            #[cfg(unix)]
             ListenerAddr::Unix(_) => None,
         };
         let service =
