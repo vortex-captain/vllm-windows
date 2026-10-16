@@ -1052,11 +1052,11 @@ fn frontend_args_accept_json() {
         "vllm-rs",
         "frontend",
         "--listen-fd",
-        "3",
+        "4294967296",
         "--input-listener-fd",
-        "999999",
+        "4294967297",
         "--output-listener-fd",
-        "999998",
+        "4294967298",
         "--coordinator-address",
         "tcp://127.0.0.1:7000",
         "--args-json",
@@ -1068,10 +1068,10 @@ fn frontend_args_accept_json() {
         Cli {
             command: Frontend(
                 FrontendArgs {
-                    listen_fd: 3,
+                    listen_fd: 4294967296,
                     grpc_listen_fd: None,
-                    input_listener_fd: 999999,
-                    output_listener_fd: 999998,
+                    input_listener_fd: 4294967297,
+                    output_listener_fd: 4294967298,
                     coordinator_address: Some(
                         "tcp://127.0.0.1:7000",
                     ),

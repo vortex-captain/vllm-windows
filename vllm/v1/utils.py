@@ -4,8 +4,8 @@ import argparse
 import contextlib
 import json
 import multiprocessing
-import threading
 import platform
+import threading
 import time
 import weakref
 from collections.abc import Callable, Sequence
@@ -40,6 +40,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
 from vllm.utils.network_utils import ZmqListener, get_open_zmq_ipc_path, get_tcp_uri
+from vllm.utils.subprocess_utils import popen_with_inherited_sockets
 from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -308,15 +309,10 @@ class RustFrontendProcessManager:
         stats_update_address: str | None = None,
         grpc_sock: Any | None = None,
     ):
-        import os
-        import subprocess
-
         listen_fd = sock.fileno()
         input_fd = input_listener.socket.fileno()
         output_fd = output_listener.socket.fileno()
-        inherited_fds = [listen_fd, input_fd, output_fd]
-        for fd in inherited_fds:
-            os.set_inheritable(fd, True)
+        sockets = [sock, input_listener.socket, output_listener.socket]
 
         cmd = [
             binary_path,
@@ -336,9 +332,8 @@ class RustFrontendProcessManager:
         ]
         if grpc_sock is not None:
             grpc_fd = grpc_sock.fileno()
-            os.set_inheritable(grpc_fd, True)
             cmd.extend(["--grpc-listen-fd", str(grpc_fd)])
-            inherited_fds.append(grpc_fd)
+            sockets.append(grpc_sock)
         if stats_update_address is not None:
             cmd.extend(["--coordinator-address", stats_update_address])
         from vllm.entrypoints.serve.utils.api_utils import jsonify_non_default_args
@@ -382,7 +377,7 @@ class RustFrontendProcessManager:
         logger.info("Launching Rust frontend: %s", " ".join(cmd[:-1] + [redacted_json]))
         self._listeners = [input_listener, output_listener]
         try:
-            self._proc = subprocess.Popen(cmd, pass_fds=inherited_fds)
+            self._proc = popen_with_inherited_sockets(cmd, sockets)
         except BaseException:
             for listener in self._listeners:
                 listener.cleanup()
@@ -408,8 +403,6 @@ class RustFrontendProcessManager:
             _shutdown_subprocesses_and_cleanup_listeners(
                 self.processes, self._listeners, timeout=timeout
             )
-
-
 class _SubprocessWrapper:
     """Wraps subprocess.Popen to provide the BaseProcess-like interface
     needed by wait_for_completion_or_failure."""
