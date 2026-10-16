@@ -39,6 +39,9 @@ tracing.workspace = true
 vllm-metrics.workspace = true
 zeromq.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Networking_WinSock"] }
+
 [dev-dependencies]
 anyhow.workspace = true
 clap.workspace = true

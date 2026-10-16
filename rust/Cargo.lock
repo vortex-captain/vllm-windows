@@ -5677,6 +5677,7 @@ dependencies = [
  "itertools 0.14.0",
  "mimalloc",
  "native-tls",
+ "openssl",
  "serde",
  "serde_json",
  "serde_with",
@@ -5693,6 +5694,7 @@ dependencies = [
  "vllm-server",
  "vllm-text",
  "vllm-tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5732,6 +5734,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vllm-metrics",
+ "windows-sys 0.61.2",
  "zeromq",
 ]
 
@@ -5771,6 +5774,7 @@ dependencies = [
  "libc",
  "tokio",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5900,6 +5904,7 @@ dependencies = [
  "vllm-proto",
  "vllm-text",
  "vllm-tokenizer",
+ "windows-sys 0.61.2",
  "zeromq",
 ]
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+#[cfg(any(unix, windows))]
 use std::io;
 use std::net::TcpListener;
 use std::process::{Command as StdCommand, ExitStatus, Stdio};
@@ -12,7 +13,7 @@ use anyhow::{Context, Result};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::interval;
-use tracing::info;
+use tracing::{info, warn};
 
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const MIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -145,13 +146,31 @@ impl ManagedEngineHandle {
         // clean up.
         let shutdown_timeout = std::cmp::max(timeout, MIN_SHUTDOWN_TIMEOUT);
 
+        let result = self.shutdown_process(pid, shutdown_timeout).await;
+        if result.is_err() {
+            self.shutdown_started.store(false, Ordering::SeqCst);
+        }
+        result
+    }
+
+    async fn shutdown_process(&self, pid: u32, shutdown_timeout: Duration) -> Result<()> {
         // First, try to gracefully terminate.
         info!(
             pid,
             ?shutdown_timeout,
-            "shutting down managed engine with SIGTERM"
+            "shutting down managed engine process group"
         );
-        process_group::terminate(pid)?;
+        if let Err(error) = process_group::terminate(pid) {
+            if self.try_wait().await.is_some() {
+                return Ok(());
+            }
+            warn!(
+                pid,
+                ?error,
+                "failed to signal managed engine process group, forcing termination"
+            );
+            return self.force_kill(pid).await;
+        }
 
         // Wait for the process to exit on its own.
         if tokio::time::timeout(shutdown_timeout, self.wait_for_exit()).await.is_ok() {
@@ -161,10 +180,18 @@ impl ManagedEngineHandle {
         // If it doesn't exit within the timeout, force kill it.
         info!(
             pid,
-            "managed engine did not exit within timeout, sending SIGKILL"
+            "managed engine did not exit within timeout, forcing termination"
         );
-        process_group::kill(pid)?;
+        self.force_kill(pid).await
+    }
 
+    async fn force_kill(&self, pid: u32) -> Result<()> {
+        if let Err(error) = process_group::kill(pid) {
+            if self.try_wait().await.is_none() {
+                return Err(error);
+            }
+            return Ok(());
+        }
         let _ = self.wait_for_exit().await;
         Ok(())
     }
@@ -172,6 +199,7 @@ impl ManagedEngineHandle {
 
 /// Process group helper functions for managing the Python subprocess and its
 /// potential children in a platform-aware way.
+#[cfg(unix)]
 mod process_group {
     use super::*;
 
@@ -210,6 +238,50 @@ mod process_group {
             return Ok(());
         }
         Err(error).context("failed to signal managed engine process group")
+    }
+}
+
+#[cfg(windows)]
+mod process_group {
+    use super::*;
+    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+    pub fn configure(command: &mut Command) {
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+
+    pub fn terminate(pid: u32) -> Result<()> {
+        let success = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) };
+        if success != 0 {
+            return Ok(());
+        }
+        Err(io::Error::last_os_error()).context("failed to signal managed engine process group")
+    }
+
+    pub fn kill(pid: u32) -> Result<()> {
+        taskkill(pid, true)
+    }
+
+    fn taskkill(pid: u32, force: bool) -> Result<()> {
+        let mut command = StdCommand::new("taskkill.exe");
+        command.arg("/PID").arg(pid.to_string()).arg("/T");
+        if force {
+            command.arg("/F");
+        }
+
+        let output = command
+            .output()
+            .context("failed to run taskkill for managed engine process group")?;
+        if output.status.success() {
+            return Ok(());
+        }
+
+        Err(anyhow::anyhow!(
+            "taskkill failed for managed engine process group {pid}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
     }
 }
 
