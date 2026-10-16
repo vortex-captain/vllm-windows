@@ -4,8 +4,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryFrom;
 use std::io::Cursor;
-use std::os::fd::IntoRawFd;
-use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Once;
@@ -306,24 +304,17 @@ fn handshake_test_config(
 }
 
 fn bootstrapped_test_config(
-    input_address: String,
-    output_address: String,
+    input_listener_fd: u64,
+    output_listener_fd: u64,
     engine_count: usize,
     ready_timeout: Duration,
     client_index: u32,
     coordinator_mode: Option<CoordinatorMode>,
 ) -> EngineCoreClientConfig {
-    fn listener(address: &str) -> i32 {
-        let path = address.strip_prefix("ipc://").expect("bootstrapped tests use IPC listeners");
-        let _ = std::fs::remove_file(path);
-        let listener = UnixListener::bind(path).expect("bind inherited test listener");
-        listener.into_raw_fd()
-    }
-
     EngineCoreClientConfig {
         transport_mode: TransportMode::Bootstrapped {
-            input_listener_fd: listener(&input_address),
-            output_listener_fd: listener(&output_address),
+            input_listener_fd,
+            output_listener_fd,
             engine_start_index: 0,
             engine_count,
             data_parallel_size: engine_count,
@@ -337,8 +328,8 @@ fn bootstrapped_test_config(
 }
 
 fn bootstrapped_test_config_with_start_index(
-    input_address: String,
-    output_address: String,
+    input_listener_fd: u64,
+    output_listener_fd: u64,
     engine_start_index: u32,
     engine_count: usize,
     ready_timeout: Duration,
@@ -346,8 +337,8 @@ fn bootstrapped_test_config_with_start_index(
     coordinator_mode: Option<CoordinatorMode>,
 ) -> EngineCoreClientConfig {
     let mut config = bootstrapped_test_config(
-        input_address,
-        output_address,
+        input_listener_fd,
+        output_listener_fd,
         engine_count,
         ready_timeout,
         client_index,
@@ -375,8 +366,8 @@ fn client_config_validates_bootstrapped_dp_range() {
     // listeners that nothing would close.
     let mut config = EngineCoreClientConfig {
         transport_mode: TransportMode::Bootstrapped {
-            input_listener_fd: -1,
-            output_listener_fd: -1,
+            input_listener_fd: u64::MAX,
+            output_listener_fd: u64::MAX,
             engine_start_index: 1,
             engine_count: 2,
             data_parallel_size: 3,
@@ -2724,7 +2715,15 @@ async fn reset_prefix_cache_returns_false_when_any_engine_fails() {
 fn python_msgpack_fixtures_match_rust_encoding() {
     init_tracing();
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/python_compat.py");
-    let output = Command::new(&script)
+    let mut command = if cfg!(windows) {
+        let python = std::env::var_os("PYTHON_SYS_EXECUTABLE").unwrap_or_else(|| "python".into());
+        let mut command = Command::new(python);
+        command.arg(&script);
+        command
+    } else {
+        Command::new(&script)
+    };
+    let output = command
         .output()
         .unwrap_or_else(|error| panic!("failed to execute {:?}: {error}", script));
     assert!(
@@ -3002,16 +3001,14 @@ fn python_msgpack_fixtures_match_rust_encoding() {
 async fn bootstrapped_connects_after_single_engine_registration() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
-    let input_address = ipc.input_endpoint();
-    let output_address = ipc.output_endpoint();
+    let (input_address, input_listener_fd) = ipc.bind_inherited_listener("input.sock").unwrap();
+    let (output_address, output_listener_fd) = ipc.bind_inherited_listener("output.sock").unwrap();
 
     let client_task = tokio::spawn({
-        let input_address = input_address.clone();
-        let output_address = output_address.clone();
         async move {
             EngineCoreClient::connect(bootstrapped_test_config(
-                input_address,
-                output_address,
+                input_listener_fd,
+                output_listener_fd,
                 1,
                 Duration::from_secs(2),
                 0,
@@ -3038,16 +3035,14 @@ async fn bootstrapped_connects_after_single_engine_registration() {
 async fn bootstrapped_connects_with_contiguous_engine_ids() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
-    let input_address = ipc.input_endpoint();
-    let output_address = ipc.output_endpoint();
+    let (input_address, input_listener_fd) = ipc.bind_inherited_listener("input.sock").unwrap();
+    let (output_address, output_listener_fd) = ipc.bind_inherited_listener("output.sock").unwrap();
 
     let client_task = tokio::spawn({
-        let input_address = input_address.clone();
-        let output_address = output_address.clone();
         async move {
             EngineCoreClient::connect(bootstrapped_test_config(
-                input_address,
-                output_address,
+                input_listener_fd,
+                output_listener_fd,
                 2,
                 Duration::from_secs(2),
                 0,
@@ -3080,16 +3075,14 @@ async fn bootstrapped_connects_with_contiguous_engine_ids() {
 async fn bootstrapped_connects_with_nonzero_engine_start_index() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
-    let input_address = ipc.input_endpoint();
-    let output_address = ipc.output_endpoint();
+    let (input_address, input_listener_fd) = ipc.bind_inherited_listener("input.sock").unwrap();
+    let (output_address, output_listener_fd) = ipc.bind_inherited_listener("output.sock").unwrap();
 
     let client_task = tokio::spawn({
-        let input_address = input_address.clone();
-        let output_address = output_address.clone();
         async move {
             EngineCoreClient::connect(bootstrapped_test_config_with_start_index(
-                input_address,
-                output_address,
+                input_listener_fd,
+                output_listener_fd,
                 3,
                 1,
                 Duration::from_secs(2),
@@ -3117,16 +3110,14 @@ async fn bootstrapped_connects_with_nonzero_engine_start_index() {
 async fn bootstrapped_rejects_unexpected_engine_id_for_start_index() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
-    let input_address = ipc.input_endpoint();
-    let output_address = ipc.output_endpoint();
+    let (input_address, input_listener_fd) = ipc.bind_inherited_listener("input.sock").unwrap();
+    let (output_address, output_listener_fd) = ipc.bind_inherited_listener("output.sock").unwrap();
 
     let client_task = tokio::spawn({
-        let input_address = input_address.clone();
-        let output_address = output_address.clone();
         async move {
             EngineCoreClient::connect(bootstrapped_test_config_with_start_index(
-                input_address,
-                output_address,
+                input_listener_fd,
+                output_listener_fd,
                 3,
                 1,
                 Duration::from_secs(2),
@@ -3164,9 +3155,11 @@ async fn bootstrapped_rejects_unexpected_engine_id_for_start_index() {
 async fn bootstrapped_connect_times_out_without_registration() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
+    let (_, input_listener_fd) = ipc.bind_inherited_listener("input.sock").unwrap();
+    let (_, output_listener_fd) = ipc.bind_inherited_listener("output.sock").unwrap();
     let result = EngineCoreClient::connect(bootstrapped_test_config(
-        ipc.input_endpoint(),
-        ipc.output_endpoint(),
+        input_listener_fd,
+        output_listener_fd,
         1,
         Duration::from_millis(100),
         0,
@@ -3185,21 +3178,19 @@ async fn bootstrapped_connect_times_out_without_registration() {
 async fn bootstrapped_external_coordinator_connects_and_subscribes() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
-    let input_address = ipc.input_endpoint();
-    let output_address = ipc.output_endpoint();
+    let (input_address, input_listener_fd) = ipc.bind_inherited_listener("input.sock").unwrap();
+    let (output_address, output_listener_fd) = ipc.bind_inherited_listener("output.sock").unwrap();
     let coordinator_address = ipc.endpoint("stats.sock");
 
     let mut stats_socket = XPubSocket::new();
     stats_socket.bind(&coordinator_address).await.unwrap();
 
     let client_task = tokio::spawn({
-        let input_address = input_address.clone();
-        let output_address = output_address.clone();
         let coordinator_address = coordinator_address.clone();
         async move {
             EngineCoreClient::connect(bootstrapped_test_config(
-                input_address,
-                output_address,
+                input_listener_fd,
+                output_listener_fd,
                 1,
                 Duration::from_secs(2),
                 0,
@@ -3230,21 +3221,19 @@ async fn bootstrapped_external_coordinator_connects_and_subscribes() {
 async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends_one_wakeup() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
-    let input_address = ipc.input_endpoint();
-    let output_address = ipc.output_endpoint();
+    let (input_address, input_listener_fd) = ipc.bind_inherited_listener("input.sock").unwrap();
+    let (output_address, output_listener_fd) = ipc.bind_inherited_listener("output.sock").unwrap();
     let coordinator_address = ipc.endpoint("stats.sock");
 
     let mut stats_socket = XPubSocket::new();
     stats_socket.bind(&coordinator_address).await.unwrap();
 
     let client_task = tokio::spawn({
-        let input_address = input_address.clone();
-        let output_address = output_address.clone();
         let coordinator_address = coordinator_address.clone();
         async move {
             EngineCoreClient::connect(bootstrapped_test_config(
-                input_address,
-                output_address,
+                input_listener_fd,
+                output_listener_fd,
                 1,
                 Duration::from_secs(2),
                 0,
@@ -3317,21 +3306,19 @@ async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends
 async fn bootstrapped_external_coordinator_running_state_suppresses_wakeup() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
-    let input_address = ipc.input_endpoint();
-    let output_address = ipc.output_endpoint();
+    let (input_address, input_listener_fd) = ipc.bind_inherited_listener("input.sock").unwrap();
+    let (output_address, output_listener_fd) = ipc.bind_inherited_listener("output.sock").unwrap();
     let coordinator_address = ipc.endpoint("stats.sock");
 
     let mut stats_socket = XPubSocket::new();
     stats_socket.bind(&coordinator_address).await.unwrap();
 
     let client_task = tokio::spawn({
-        let input_address = input_address.clone();
-        let output_address = output_address.clone();
         let coordinator_address = coordinator_address.clone();
         async move {
             EngineCoreClient::connect(bootstrapped_test_config(
-                input_address,
-                output_address,
+                input_listener_fd,
+                output_listener_fd,
                 1,
                 Duration::from_secs(2),
                 0,

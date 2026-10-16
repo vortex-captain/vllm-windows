@@ -499,10 +499,10 @@ impl SharedRuntimeArgs {
     /// inherits an already open HTTP listener from the supervisor process.
     fn into_bootstrapped_config(
         self,
-        listen_fd: i32,
-        grpc_listen_fd: Option<i32>,
-        input_listener_fd: i32,
-        output_listener_fd: i32,
+        listen_fd: u64,
+        grpc_listen_fd: Option<u64>,
+        input_listener_fd: u64,
+        output_listener_fd: u64,
         coordinator_address: Option<String>,
         engine_start_index: u32,
         engine_count: usize,
@@ -689,20 +689,20 @@ fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
 #[derive(Educe, Clone, Args, PartialEq, Eq)]
 #[educe(Debug)]
 pub struct FrontendArgs {
-    /// Inherited listening socket file descriptor passed by the Python
+    /// Inherited listener descriptor or socket handle passed by the Python
     /// supervisor.
     #[arg(long)]
-    pub listen_fd: i32,
+    pub listen_fd: u64,
     /// Inherited gRPC listening socket file descriptor passed by the Python
     /// supervisor. When not set, no gRPC server is started.
     #[arg(long)]
-    pub grpc_listen_fd: Option<i32>,
-    /// Inherited frontend input ROUTER listener file descriptor.
+    pub grpc_listen_fd: Option<u64>,
+    /// Inherited frontend input ROUTER listener descriptor or socket handle.
     #[arg(long)]
-    pub input_listener_fd: i32,
-    /// Inherited frontend output PULL listener file descriptor.
+    pub input_listener_fd: u64,
+    /// Inherited frontend output PULL listener descriptor or socket handle.
     #[arg(long)]
-    pub output_listener_fd: i32,
+    pub output_listener_fd: u64,
     /// Optional Python-owned frontend-side DP coordinator socket address for
     /// external coordinator mode in the bootstrapped frontend path, i.e.,
     /// `stats_update_address`.

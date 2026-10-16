@@ -5,8 +5,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
 use std::io;
-use std::os::fd::IntoRawFd;
-use std::os::unix::net::UnixListener;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -2209,8 +2207,10 @@ async fn control_aggregates_multi_engine_capacity() {
     // Local capacity and ownership must not expand to the deployment-wide DP size.
     for (start_rank, global_size) in [(0, 2), (0, 8), (4, 8)] {
         let ipc = IpcNamespace::new().expect("create ipc namespace");
-        let input_address = ipc.input_endpoint();
-        let output_address = ipc.output_endpoint();
+        let (input_address, input_listener_fd) =
+            ipc.bind_inherited_listener("input.sock").expect("bind inherited input listener");
+        let (output_address, output_listener_fd) =
+            ipc.bind_inherited_listener("output.sock").expect("bind inherited output listener");
 
         let mut ready_0 = default_ready_response();
         ready_0.max_model_len = 8_192;
@@ -2234,14 +2234,10 @@ async fn control_aggregates_multi_engine_capacity() {
         ready_1.world_size = 12;
         ready_1.data_parallel_rank = start_rank + 1;
 
-        let listener_fd = |address: &str| {
-            let path = address.strip_prefix("ipc://").expect("IPC test endpoint");
-            UnixListener::bind(path).expect("bind inherited test listener").into_raw_fd()
-        };
         let client_config = EngineCoreClientConfig {
             transport_mode: TransportMode::Bootstrapped {
-                input_listener_fd: listener_fd(&input_address),
-                output_listener_fd: listener_fd(&output_address),
+                input_listener_fd,
+                output_listener_fd,
                 engine_start_index: start_rank,
                 engine_count: 2,
                 data_parallel_size: global_size,

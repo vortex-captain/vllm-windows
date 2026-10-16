@@ -4,8 +4,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::ops::Deref;
+#[cfg(unix)]
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+#[cfg(unix)]
 use std::os::unix::net::UnixListener as StdUnixListener;
+#[cfg(windows)]
+use std::os::windows::io::{FromRawSocket, OwnedSocket};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -17,6 +21,8 @@ use tracing::{debug, error, info, trace, warn};
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{PullSocket, RouterSendHalf, RouterSocket, ZmqError, ZmqMessage};
+#[cfg(windows)]
+use windows_sys::Win32::Networking::WinSock::{SO_TYPE, SOL_SOCKET, WSAGetLastError, getsockopt};
 
 use crate::coordinator::CoordinatorBootstrap;
 use crate::error::{Error, Result, bail_unexpected_handshake_message};
@@ -329,8 +335,8 @@ pub async fn connect_handshake(
 /// identities are synthesized from contiguous rank order instead of being
 /// discovered through a Rust-owned handshake.
 pub async fn connect_bootstrapped(
-    input_listener_fd: RawFd,
-    output_listener_fd: RawFd,
+    input_listener_fd: u64,
+    output_listener_fd: u64,
     engine_start_index: u32,
     engine_count: usize,
     ready_timeout: Duration,
@@ -393,7 +399,11 @@ pub async fn connect_bootstrapped(
     })
 }
 
-fn adopt_listener(fd: RawFd) -> Result<zeromq::Listener> {
+#[cfg(unix)]
+fn adopt_listener(fd: u64) -> Result<zeromq::Listener> {
+    let fd = RawFd::try_from(fd).map_err(|_| Error::InvalidClientConfig {
+        message: format!("inherited ZMQ listener fd {fd} is out of range"),
+    })?;
     if fd < 0 || unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
         return Err(Error::InvalidClientConfig {
             message: format!("inherited ZMQ listener fd {fd} is not open"),
@@ -419,6 +429,42 @@ fn adopt_listener(fd: RawFd) -> Result<zeromq::Listener> {
     Err(Error::InvalidClientConfig {
         message: format!("unsupported inherited listener domain {domain:?}"),
     })
+}
+
+#[cfg(windows)]
+fn adopt_listener(fd: u64) -> Result<zeromq::Listener> {
+    let handle = usize::try_from(fd).map_err(|_| Error::InvalidClientConfig {
+        message: format!("inherited ZMQ listener socket {fd} is out of range"),
+    })?;
+    let mut socket_type: i32 = 0;
+    let mut len = i32::try_from(std::mem::size_of_val(&socket_type))
+        .expect("socket type size fits i32");
+    let result = unsafe {
+        getsockopt(
+            handle,
+            SOL_SOCKET,
+            SO_TYPE,
+            (&mut socket_type as *mut i32).cast(),
+            &mut len,
+        )
+    };
+    if result != 0 {
+        let error = std::io::Error::from_raw_os_error(unsafe { WSAGetLastError() });
+        return Err(Error::InvalidClientConfig {
+            message: format!("inherited ZMQ listener socket {fd} is not open: {}", error.as_report()),
+        });
+    }
+
+    // The supervisor transfers ownership of each inherited socket exactly once.
+    let socket = unsafe { OwnedSocket::from_raw_socket(fd) };
+    let socket: socket2::Socket = socket.into();
+    if socket.local_addr()?.as_socket().is_none() {
+        return Err(Error::InvalidClientConfig {
+            message: "only inherited TCP listeners are supported on Windows".to_owned(),
+        });
+    }
+    let listener: std::net::TcpListener = socket.into();
+    Ok(listener.into())
 }
 
 /// Bind new input and output sockets.
@@ -639,7 +685,10 @@ pub async fn run_output_loop(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::fd::IntoRawFd;
+    #[cfg(windows)]
+    use std::os::windows::io::IntoRawSocket;
 
     use zeromq::RouterSocket;
     use zeromq::prelude::Socket;
@@ -660,16 +709,25 @@ mod tests {
     async fn inherited_tcp_listener_is_adopted_without_rebinding() {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind listener");
         let expected = listener.local_addr().expect("listener address");
+        #[cfg(unix)]
+        let fd = listener.into_raw_fd().try_into().expect("listener fd is nonnegative");
+        #[cfg(windows)]
+        let fd = listener.into_raw_socket();
         let mut router = RouterSocket::new();
 
         let endpoint = router
             .bind_listener(
-                adopt_listener(listener.into_raw_fd()).expect("adopt inherited listener fd"),
+                adopt_listener(fd).expect("adopt inherited listener fd"),
             )
             .await
             .expect("bind inherited listener");
 
         assert_eq!(endpoint.to_string(), format!("tcp://{expected}"));
         assert!(router.close().await.is_empty());
+    }
+
+    #[test]
+    fn inherited_listener_rejects_invalid_handle() {
+        assert!(adopt_listener(u64::MAX).is_err());
     }
 }
