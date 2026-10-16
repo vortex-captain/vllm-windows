@@ -61,9 +61,9 @@ pub enum TransportMode {
     /// copied integer values do not create additional descriptor ownership.
     Bootstrapped {
         /// Raw input ROUTER listener descriptor inherited from the supervisor.
-        input_listener_fd: i32,
+        input_listener_fd: u64,
         /// Raw output PULL listener descriptor inherited from the supervisor.
-        output_listener_fd: i32,
+        output_listener_fd: u64,
         /// First data-parallel engine rank expected to register on this
         /// transport.
         engine_start_index: u32,

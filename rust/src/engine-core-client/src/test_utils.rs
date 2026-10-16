@@ -54,6 +54,28 @@ impl IpcNamespace {
     pub fn output_endpoint(&self) -> String {
         self.endpoint("output.sock")
     }
+
+    /// Bind a listener and transfer its descriptor or socket handle to a test.
+    pub fn bind_inherited_listener(&self, name: impl AsRef<Path>) -> std::io::Result<(String, u64)> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::IntoRawFd;
+            let path = self.dir.path().join(name);
+            let listener = std::os::unix::net::UnixListener::bind(&path)?;
+            Ok((
+                format!("ipc://{}", path.to_string_lossy()),
+                listener.into_raw_fd().try_into().expect("listener fd is nonnegative"),
+            ))
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::IntoRawSocket;
+            let _ = name;
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+            let address = format!("tcp://{}", listener.local_addr()?);
+            Ok((address, listener.into_raw_socket()))
+        }
+    }
 }
 
 fn test_mock_engine_config() -> MockEngineConfig {

@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 mod cli;
+#[cfg(windows)]
+mod winsock;
 
 use std::env;
 use std::ffi::OsStr;
@@ -64,16 +66,24 @@ fn shutdown_signal() -> CancellationToken {
             tokio::signal::ctrl_c().await.expect("failed to install Ctrl-C signal handler");
         };
 
-        let sigterm = async {
+        #[cfg(unix)]
+        let terminate = async {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                 .expect("failed to install SIGTERM signal handler")
+                .recv()
+                .await;
+        };
+        #[cfg(windows)]
+        let terminate = async {
+            tokio::signal::windows::ctrl_break()
+                .expect("failed to install Ctrl-Break signal handler")
                 .recv()
                 .await;
         };
 
         tokio::select! {
             _ = ctrl_c => info!("received shutdown signal (Ctrl-C), shutting down..."),
-            _ = sigterm => info!("received shutdown signal (SIGTERM), shutting down..."),
+            _ = terminate => info!("received termination signal, shutting down..."),
         }
 
         shutdown.cancel();
@@ -92,6 +102,15 @@ fn main() -> ExitCode {
     vllm_tracing::init_tracing(process_label);
 
     let cli = Cli::parse();
+
+    #[cfg(windows)]
+    let _winsock = match winsock::Winsock::initialize() {
+        Ok(winsock) => winsock,
+        Err(error) => {
+            error!("failed to initialize Winsock: {}", error.as_report());
+            return ExitCode::FAILURE;
+        }
+    };
 
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
@@ -194,7 +213,7 @@ async fn async_main(cli: Cli) -> Result<()> {
 
             // Shutdown begins. Terminate the managed engine first.
             engine.shutdown(shutdown_timeout).await?;
-            info!("managed engine shut down gracefully");
+            info!("managed engine shut down");
             // Wait for the API server to shut down gracefully by draining in-flight
             // requests.
             if !matches!(shutdown_reason, ShutdownReason::Server(_)) {
