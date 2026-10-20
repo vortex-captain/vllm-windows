@@ -29,6 +29,18 @@ endif()
 FetchContent_MakeAvailable(deepselect)
 message(STATUS "DeepSelect is available at ${deepselect_SOURCE_DIR}")
 
+if(WIN32)
+    if(NOT EXISTS "${deepselect_SOURCE_DIR}/csrc/3rdparty/cutlass/include/cutlass/cuda_host_adapter.hpp")
+        message(FATAL_ERROR
+            "DeepSelect CUTLASS submodule is missing. Initialize submodules under "
+            "${deepselect_SOURCE_DIR} before configuring vLLM.")
+    endif()
+    vllm_apply_patch(
+        "DeepSelect Windows"
+        "${deepselect_SOURCE_DIR}"
+        "${CMAKE_CURRENT_LIST_DIR}/../patches/deepselect-windows.patch")
+endif()
+
 # DeepSelect kernels require CUDA 12.9+; 10.0f (family) covers SM100 and SM103.
 set(DEEPSELECT_SUPPORT_ARCHS)
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
