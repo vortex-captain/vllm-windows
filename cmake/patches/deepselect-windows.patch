@@ -1,0 +1,166 @@
+diff --git a/csrc/3rdparty/kerutils/include/kerutils/device/cuda/common.h b/csrc/3rdparty/kerutils/include/kerutils/device/cuda/common.h
+index 05d671e..c9eb00c 100644
+--- a/csrc/3rdparty/kerutils/include/kerutils/device/cuda/common.h
++++ b/csrc/3rdparty/kerutils/include/kerutils/device/cuda/common.h
+@@ -37,6 +37,12 @@ using nve4m3x4 = __nv_fp8x4_e4m3;
+ using bf16 = cutlass::bfloat16_t;
+ using transac_bar_t = cutlass::arch::ClusterTransactionBarrier;
+ 
++#ifdef _MSC_VER
++using int128_t = int4;
++#else
++using int128_t = __int128_t;
++#endif
++
+ }
+ 
+ #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800))
+diff --git a/csrc/3rdparty/kerutils/include/kerutils/device/cuda/sm80/helpers.cuh b/csrc/3rdparty/kerutils/include/kerutils/device/cuda/sm80/helpers.cuh
+index 0227edd..1e13d33 100644
+--- a/csrc/3rdparty/kerutils/include/kerutils/device/cuda/sm80/helpers.cuh
++++ b/csrc/3rdparty/kerutils/include/kerutils/device/cuda/sm80/helpers.cuh
+@@ -30,26 +30,39 @@ float2 float2float2(const float &x) {
+ }
+ 
+ CUTE_DEVICE
+-void st_shared(void* ptr, __int128_t val) {
++void st_shared(void* ptr, int128_t val) {
++#ifdef _MSC_VER
++    asm volatile("st.shared.v4.b32 [%0], {%1, %2, %3, %4};"
++                 :
++                 : "r"(cute::cast_smem_ptr_to_uint(ptr)), "r"(val.x), "r"(val.y),
++                   "r"(val.z), "r"(val.w));
++#else
+     asm volatile("st.shared.b128 [%0], %1;" :: "r"(cute::cast_smem_ptr_to_uint(ptr)), "q"(val));
++#endif
+ }
+ 
+ CUTE_DEVICE
+ void st_shared(void* ptr, float4 val) {
+-    st_shared(ptr, *(__int128_t*)&val);
++    st_shared(ptr, *reinterpret_cast<int128_t*>(&val));
+ }
+ 
+ CUTE_DEVICE
+-__int128_t ld_shared(const void* ptr) {
+-    __int128_t val;
++int128_t ld_shared(const void* ptr) {
++    int128_t val;
++#ifdef _MSC_VER
++    asm volatile("ld.shared.v4.b32 {%0, %1, %2, %3}, [%4];"
++                 : "=r"(val.x), "=r"(val.y), "=r"(val.z), "=r"(val.w)
++                 : "r"(cute::cast_smem_ptr_to_uint(ptr)));
++#else
+     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(val) : "r"(cute::cast_smem_ptr_to_uint(ptr)));
++#endif
+     return val;
+ }
+ 
+ CUTE_DEVICE
+ float4 ld_shared_float4(const void* ptr) {
+-    __int128_t temp = ld_shared(ptr);
+-    return *(float4*)&temp;
++    auto temp = ld_shared(ptr);
++    return *reinterpret_cast<float4*>(&temp);
+ }
+ 
+ }
+diff --git a/csrc/3rdparty/kerutils/include/kerutils/device/cuda/sm90/intrinsics.cuh b/csrc/3rdparty/kerutils/include/kerutils/device/cuda/sm90/intrinsics.cuh
+index e6120f9..40d2a9f 100644
+--- a/csrc/3rdparty/kerutils/include/kerutils/device/cuda/sm90/intrinsics.cuh
++++ b/csrc/3rdparty/kerutils/include/kerutils/device/cuda/sm90/intrinsics.cuh
+@@ -9,13 +9,13 @@ template<typename T>
+ CUTE_DEVICE
+ static void st_async(void* dst_ptr, const T& data, transac_bar_t &mbar) {
+     static_assert(sizeof(T) == 16, "Data type must be 16 bytes (128 bits) for st_async.");
+-    long2 data_long2 = *reinterpret_cast<const long2*>(&data);
++    longlong2 data_longlong2 = *reinterpret_cast<const longlong2*>(&data);
+     uint32_t dst_addr = cute::cast_smem_ptr_to_uint(dst_ptr);
+     uint32_t mbar_addr = cute::cast_smem_ptr_to_uint(&mbar);
+     asm volatile (
+         "st.async.weak.shared::cluster.mbarrier::complete_tx::bytes.v2.s64 [%0], {%1, %2}, [%3]; \n"
+         :
+-        : "r"(dst_addr), "l"(data_long2.x), "l"(data_long2.y), "r"(mbar_addr)
++        : "r"(dst_addr), "l"(data_longlong2.x), "l"(data_longlong2.y), "r"(mbar_addr)
+     );
+ }
+ 
+diff --git a/csrc/cuda_kernels/common_parts.cuh b/csrc/cuda_kernels/common_parts.cuh
+index e3f3cac..0a26ca8 100644
+--- a/csrc/cuda_kernels/common_parts.cuh
++++ b/csrc/cuda_kernels/common_parts.cuh
+@@ -47,7 +47,7 @@ void ld_shared(ValueT res[NUM_VALUES], const ValueT* ptr) {
+     static_assert(NUM_BYTES_TO_LOAD == 16 || NUM_BYTES_TO_LOAD == 8 || NUM_BYTES_TO_LOAD == 4 || NUM_BYTES_TO_LOAD == 2);
+     uint32_t addr = cute::cast_smem_ptr_to_uint(ptr);
+     if constexpr (NUM_BYTES_TO_LOAD == 16) {
+-        *(__int128_t*)res = ku::ld_shared(ptr);
++        *(ku::int128_t*)res = ku::ld_shared(ptr);
+     } else if constexpr (NUM_BYTES_TO_LOAD == 8) {
+         asm volatile ("ld.weak.shared::cta.b64 %0, [%1];\n" : "=l"(*(int64_t*)res) : "r"(addr) : "memory");
+     } else if constexpr (NUM_BYTES_TO_LOAD == 4) {
+@@ -221,7 +221,7 @@ struct EpilogueRunner {
+                     for (uint32_t i = (threadIdx.x-NUM_THREADS/2) * NUM_VALUES_PER_LDG128; i < end_vocab_idx; i += (NUM_THREADS/2) * NUM_VALUES_PER_LDG128) {
+                         ValueT values[NUM_VALUES_PER_LDG128];
+                         KU_LDG_128(input_values + i, values, ".nc", "no_allocate", "256B");
+-                        ku::st_shared(smem_value_buf + i, *(__int128_t*)values);
++                        ku::st_shared(smem_value_buf + i, *(ku::int128_t*)values);
+                     }
+                 }
+                 __syncthreads();
+@@ -586,9 +586,13 @@ public:
+     static __device__ __forceinline__ 
+     void clear_reconstruct_histograms(SharedMemoryPlanBase &smem, uint32_t thread_idx) {
+         static_assert((2 * NUM_RECONSTRUCT_BUCKET_SLOTS) % 4 == 0);
++#ifdef _MSC_VER
++        ku::int128_t zero{0, 0, 0, 0};
++#else
+         __int128_t zero = (__int128_t)0ull;
++#endif
+         for (uint32_t i = thread_idx; i < (2 * NUM_RECONSTRUCT_BUCKET_SLOTS) / 4; i += NUM_THREADS) {
+-            reinterpret_cast<__int128_t*>(smem.reconstruct_bucket_counter)[i] = zero;
++            reinterpret_cast<ku::int128_t*>(smem.reconstruct_bucket_counter)[i] = zero;
+         }
+     }
+ 
+@@ -713,7 +717,13 @@ public:
+     // TMA only loads the real tail elements; the unused padded tail region must still be initialized as -INF
+     static __device__ __forceinline__ void fill_padded_tail_segments(ValueT *init_buf, uint32_t num_tail_elems) {
+         uint32_t tail_covered_by_tma = ku::ceil(num_tail_elems, (uint32_t)NUM_ELEMS_PER_SEG);
++#ifdef _MSC_VER
++        constexpr ku::int128_t FILLER_128b{
++            static_cast<int>(PLACEHOLDER_B64), static_cast<int>(PLACEHOLDER_B64 >> 32),
++            static_cast<int>(PLACEHOLDER_B64), static_cast<int>(PLACEHOLDER_B64 >> 32)};
++#else
+         constexpr __int128_t FILLER_128b = ((__int128_t)PLACEHOLDER_B64 << 64) | PLACEHOLDER_B64;
++#endif
+         for (uint32_t i = tail_covered_by_tma + threadIdx.x * NUM_ELEMS_PER_128b; i < NUM_TAIL_ELEMS; i += NUM_THREADS * NUM_ELEMS_PER_128b) {
+             ku::st_shared(init_buf + i, FILLER_128b);
+         }
+diff --git a/csrc/cuda_kernels/v3_fp32/topk_select.cuh b/csrc/cuda_kernels/v3_fp32/topk_select.cuh
+index e0fc895..e96d89f 100644
+--- a/csrc/cuda_kernels/v3_fp32/topk_select.cuh
++++ b/csrc/cuda_kernels/v3_fp32/topk_select.cuh
+@@ -181,7 +181,11 @@ public:
+                 constexpr uint32_t NUM_BUCKET_CLEAR_128b = NUM_RECONSTRUCT_BUCKETS / 4;
+                 static_assert(NUM_THREADS >= NUM_BUCKET_CLEAR_128b);
+                 if (threadIdx.x < NUM_BUCKET_CLEAR_128b) {
++#ifdef _MSC_VER
++                    reinterpret_cast<ku::int128_t*>(clr)[threadIdx.x] = ku::int128_t{0, 0, 0, 0};
++#else
+                     reinterpret_cast<__int128_t*>(clr)[threadIdx.x] = (__int128_t)0ull;
++#endif
+                 }
+                 __syncthreads();
+                 if (warp_idx == 0) {
+diff --git a/csrc/3rdparty/cutlass/include/cutlass/cuda_host_adapter.hpp b/csrc/3rdparty/cutlass/include/cutlass/cuda_host_adapter.hpp
+index ed0c0df6..a68068b1 100644
+--- a/csrc/3rdparty/cutlass/include/cutlass/cuda_host_adapter.hpp
++++ b/csrc/3rdparty/cutlass/include/cutlass/cuda_host_adapter.hpp
+@@ -407,7 +407,6 @@ public:
+ 
+   /// Fills a buffer in Global Memory with a byte sequence copied from host memory
+   template<class FillValueType>
+-  CUTLASS_HOST_DEVICE
+   Status memsetDevice(
+       void* destination,
+       FillValueType fill_value, 
