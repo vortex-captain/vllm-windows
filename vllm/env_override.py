@@ -965,8 +965,7 @@ def _patch_inductor_pattern_matcher() -> None:
 
 # Remove once the minimum supported torch includes
 # https://github.com/pytorch/pytorch/pull/196013.
-if not is_torch_equal_or_newer("2.16.0.dev"):
-    _patch_inductor_pattern_matcher()
+_patch_inductor_pattern_matcher()
 
 # ============================================================
 # Triton Autotuner determinism
