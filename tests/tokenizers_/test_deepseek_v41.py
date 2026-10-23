@@ -24,11 +24,15 @@ def render(messages, **kwargs):
 def test_reference_encoder_fixtures(case_id):
     # Expected prompts come from the DeepSeek V4.1 reference encoder.
     data = json.loads(
-        (FIXTURES / "deepseek_v4" / f"test_input_{case_id}.json").read_text()
+        (FIXTURES / "deepseek_v4" / f"test_input_{case_id}.json").read_text(
+            encoding="utf-8"
+        )
     )
     messages = data["messages"] if isinstance(data, dict) else data
     tools = data.get("tools") if isinstance(data, dict) else None
-    expected = (FIXTURES / "deepseek_v41" / f"test_output_{case_id}.txt").read_text()
+    expected = (FIXTURES / "deepseek_v41" / f"test_output_{case_id}.txt").read_text(
+        encoding="utf-8"
+    )
     assert render(messages, tools=tools) == expected
 
 
