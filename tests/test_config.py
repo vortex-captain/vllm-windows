@@ -1562,13 +1562,15 @@ def test_all2all_backend_has_portable_default():
     assert ParallelConfig().all2all_backend == "allgather_reducescatter"
 
 
-def test_dp_group_uses_configured_timeout_without_current_config(monkeypatch):
+def test_dp_group_uses_configured_timeout_without_current_config(monkeypatch, tmp_path):
     monkeypatch.setattr(vllm_config_module, "_current_vllm_config", None)
     config = ParallelConfig(cpu_distributed_timeout_seconds=30)
     with (
         patch(
             "vllm.distributed.utils.rendezvous",
-            return_value=iter([(torch.distributed.HashStore(), 0, 1)]),
+            return_value=iter(
+                [(torch.distributed.FileStore(str(tmp_path / "store"), 1), 0, 1)]
+            ),
         ),
         patch("vllm.distributed.utils.init_gloo_process_group") as init_group,
     ):
