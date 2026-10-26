@@ -47,6 +47,11 @@ if(WIN32)
     "${FLASHMLA_WINDOWS_PATCH}"
     UNIDIFF_ZERO)
 
+  vllm_apply_patch(
+    "FlashMLA Windows SM90 force-inline"
+    "${flashmla_SOURCE_DIR}"
+    "${CMAKE_CURRENT_LIST_DIR}/../patches/flashmla-sm90-forceinline.patch")
+
   file(READ
     "${flashmla_SOURCE_DIR}/csrc/3rdparty/kerutils/include/kerutils/device/cuda/common.h"
     FLASHMLA_COMMON_HEADER)
