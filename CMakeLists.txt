@@ -599,9 +599,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
       if (NOT DEFINED CACHE{MACHETE_GEN_SCRIPT_HASH}
           OR NOT $CACHE{MACHETE_GEN_SCRIPT_HASH} STREQUAL ${MACHETE_GEN_SCRIPT_HASH})
+        if(WIN32)
+          set(MACHETE_PYTHONPATH
+            "${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/;${CUTLASS_DIR}/python/;${VLLM_PYTHON_PATH};$ENV{PYTHONPATH}")
+        else()
+          set(MACHETE_PYTHONPATH
+            "${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$ENV{PYTHONPATH}")
+        endif()
         execute_process(
           COMMAND ${CMAKE_COMMAND} -E env
-          PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$ENV{PYTHONPATH}
+          "PYTHONPATH=${MACHETE_PYTHONPATH}"
             ${Python_EXECUTABLE} ${MACHETE_GEN_SCRIPT}
           RESULT_VARIABLE machete_generation_result
           OUTPUT_VARIABLE machete_generation_output
