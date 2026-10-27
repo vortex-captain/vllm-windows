@@ -184,7 +184,11 @@ namespace cg = cooperative_groups;
 
 // PackedType is the Lamport buffer access width (LDG.128 or LDG.64).
 template <typename PackedType = float4, bool UseCGA = false>
+#ifdef _MSC_VER
+struct __align__(32) LamportFlags {
+#else
 __device__ struct __attribute__((aligned(32))) LamportFlags {
+#endif
  public:
   __device__ explicit LamportFlags(uint32_t* bufferFlags,
                                    uint32_t numStages = 1)
