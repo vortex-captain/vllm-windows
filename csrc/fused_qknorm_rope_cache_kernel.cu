@@ -17,6 +17,10 @@
 #include <algorithm>
 #include <type_traits>
 
+#ifdef _MSC_VER
+  #include <bit>
+#endif
+
 namespace vllm {
 
 namespace {
@@ -313,7 +317,11 @@ void launch_qknorm_rope_cache(
   const int block_size = static_cast<int>(k_cache.size(1));
   const int block_size_shift =
       (block_size & (block_size - 1)) == 0
+#ifdef _MSC_VER
+          ? std::countr_zero(static_cast<unsigned int>(block_size))
+#else
           ? __builtin_ctz(static_cast<unsigned int>(block_size))
+#endif
           : -1;
 
 #define LAUNCH_QKNORM_ROPE_CACHE(HEAD_DIM, WIDE_192_ROTARY)                    \
