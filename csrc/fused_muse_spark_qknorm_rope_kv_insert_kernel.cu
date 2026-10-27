@@ -29,6 +29,10 @@
 #include <cuda_runtime.h>
 #include <type_traits>
 
+#ifdef _MSC_VER
+  #include <bit>
+#endif
+
 #include "torch_utils.h"
 
 #include "core/cuda_compat.h"
@@ -92,7 +96,11 @@ inline FastDiv makeFastDiv(int denom) {
   // device side selects on. Dividends stay below 2^31, which covers every slot
   // index this kernel can form.
   if (denom <= 1) return FastDiv{0u, 0u, 1};
+#ifdef _MSC_VER
+  int lg = 31 - std::countl_zero(static_cast<uint32_t>(denom));
+#else
   int lg = 31 - __builtin_clz(denom);
+#endif
   if ((1 << lg) < denom) lg++;
   uint32_t const p = 31 + static_cast<uint32_t>(lg);
   uint64_t const m = ((1ull << p) + static_cast<uint64_t>(denom) - 1) /
