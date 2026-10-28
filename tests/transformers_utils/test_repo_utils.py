@@ -59,7 +59,7 @@ def test_list_filtered_repo_files(
                     tmp_dir, allow_patterns, "revision", "model", "token"
                 )
             )
-        assert out_files == sorted(expected_relative_files)
+        assert out_files == sorted(str(Path(file)) for file in expected_relative_files)
         assert mock_list_repo_files.call_count == 1
         assert mock_list_repo_files.call_args_list[0] == call(
             repo_id=tmp_dir,
