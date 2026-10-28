@@ -46,7 +46,9 @@ def _model_config():
 
 
 def _load_reference_case(case_id: int):
-    data = json.loads((FIXTURES_DIR / f"test_input_{case_id}.json").read_text())
+    data = json.loads(
+        (FIXTURES_DIR / f"test_input_{case_id}.json").read_text(encoding="utf-8")
+    )
     if isinstance(data, dict):
         return data["messages"], data.get("tools")
     return data, None
@@ -399,7 +401,7 @@ def test_deepseek_v4_maps_xhigh_to_high_reasoning_effort():
 def test_deepseek_v4_matches_reference_golden_fixtures(case_id, kwargs):
     prompt = _render_reference_case(case_id, **kwargs)
 
-    expected = (FIXTURES_DIR / f"test_output_{case_id}.txt").read_text()
+    expected = (FIXTURES_DIR / f"test_output_{case_id}.txt").read_text(encoding="utf-8")
     assert prompt == expected
 
 

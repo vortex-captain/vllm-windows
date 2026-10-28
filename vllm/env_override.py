@@ -963,10 +963,10 @@ def _patch_inductor_pattern_matcher() -> None:
     sys.meta_path.insert(0, _PatternMatcherPatchFinder())
 
 
-# Remove once the minimum supported torch includes
-# https://github.com/pytorch/pytorch/pull/196013.
-if not is_torch_equal_or_newer("2.16.0.dev"):
-    _patch_inductor_pattern_matcher()
+# TODO[WIN]: Recheck https://github.com/pytorch/pytorch/pull/196013 and gate this
+# backport on the first torch version containing the fix. Remove it once the
+# minimum supported torch includes the fix.
+_patch_inductor_pattern_matcher()
 
 # ============================================================
 # Triton Autotuner determinism
