@@ -15,7 +15,7 @@ import json
 import time
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -1020,19 +1020,16 @@ async def test_async_cohere_renderer_does_not_block_event_loop():
         time.sleep(2)
         return expected_prompt
 
-    mock_tokenizer = Mock(spec=HfTokenizer)
-    renderer = CohereRenderer(
-        _MockVllmConfig(_MockModelConfig(), _MockParallelConfig()),
-        tokenizer=mock_tokenizer,
-    )
-
-    # Replace the (already-imported) ``cohere_melody`` bindings with a
-    # blocking mock. ``_render`` reads ``self._melody`` at call time, so
-    # this works even though ``_render_async`` was bound at __init__.
     fake_melody = Mock()
     fake_melody.render_cmd3 = slow_render
     fake_melody.render_cmd4 = slow_render
-    renderer._melody = fake_melody
+
+    mock_tokenizer = Mock(spec=HfTokenizer)
+    with patch("vllm.renderers.cohere._try_import_melody", return_value=fake_melody):
+        renderer = CohereRenderer(
+            _MockVllmConfig(_MockModelConfig(), _MockParallelConfig()),
+            tokenizer=mock_tokenizer,
+        )
 
     task = renderer.render_messages_async([], ChatParams())
 
