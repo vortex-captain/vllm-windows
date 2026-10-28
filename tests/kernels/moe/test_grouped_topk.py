@@ -8,7 +8,6 @@ Run `pytest tests/kernels/moe/test_grouped_topk.py`.
 import pytest
 import torch
 
-import vllm.envs as envs
 from vllm.config import (
     CompilationConfig,
     VllmConfig,
@@ -148,7 +147,7 @@ def test_grouped_topk(
 
     with set_current_vllm_config(vllm_config), monkeypatch.context() as m:
         m.setenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "0")
-        m.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+        m.setenv("VLLM_BATCH_INVARIANT", "1")
         grouped_topk = GroupedTopk(
             topk=topk,
             renormalize=renormalize,

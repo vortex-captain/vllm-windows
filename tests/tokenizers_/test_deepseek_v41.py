@@ -41,12 +41,16 @@ def tool_call(name):
 def test_reference_encoder_fixtures(case_id):
     # Copied from DeepSeek-V4.1-Flash-1017 encoding/tests.
     data = json.loads(
-        (FIXTURES / "deepseek_v41" / f"test_input_{case_id}.json").read_text()
+        (FIXTURES / "deepseek_v41" / f"test_input_{case_id}.json").read_text(
+            encoding="utf-8"
+        )
     )
     case = data if isinstance(data, dict) else {"messages": data}
     messages = case["messages"]
     thinking_mode = case.get("thinking_mode") or "chat"
-    expected = (FIXTURES / "deepseek_v41" / f"test_output_{case_id}.txt").read_text()
+    expected = (FIXTURES / "deepseek_v41" / f"test_output_{case_id}.txt").read_text(
+        encoding="utf-8"
+    )
 
     if any(m["role"] == "latest_reminder" for m in messages):
         # latest_reminder is not an API role.
