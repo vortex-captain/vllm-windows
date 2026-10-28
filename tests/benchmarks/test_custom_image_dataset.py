@@ -103,8 +103,8 @@ def test_get_samples_custom_image_cli_path_supports_multi_image_and_content(
     assert samples[0].request_id == "req-0"
     assert isinstance(samples[0].multi_modal_data, list)
     assert [part["image_url"]["url"] for part in samples[0].multi_modal_data] == [
-        f"file://{image_a}",
-        f"file://{image_b}",
+        image_a.resolve().as_uri(),
+        image_b.resolve().as_uri(),
     ]
 
     assert samples[1].request_id == "req-1"
@@ -112,7 +112,7 @@ def test_get_samples_custom_image_cli_path_supports_multi_image_and_content(
     assert isinstance(samples[1].prompt, list)
     assert samples[1].prompt[0] == {"type": "text", "text": "Now compare "}
     assert isinstance(samples[1].prompt[1], dict)
-    assert samples[1].prompt[1]["image_url"]["url"] == f"file://{image_c}"
+    assert samples[1].prompt[1]["image_url"]["url"] == image_c.resolve().as_uri()
 
 
 @pytest.mark.benchmark
@@ -143,8 +143,8 @@ def test_custom_image_dataset_uses_all_image_files(tmp_path: Path) -> None:
     assert sample.prompt_len == 3
     assert isinstance(sample.multi_modal_data, list)
     assert [part["image_url"]["url"] for part in sample.multi_modal_data] == [
-        f"file://{image_a}",
-        f"file://{image_b}",
+        image_a.resolve().as_uri(),
+        image_b.resolve().as_uri(),
     ]
 
 
@@ -197,9 +197,9 @@ def test_custom_image_dataset_preserves_interleaved_content_order(
         "text",
         "image_url",
     ]
-    assert parts[1]["image_url"]["url"] == f"file://{image_a}"
+    assert parts[1]["image_url"]["url"] == image_a.resolve().as_uri()
     assert parts[3]["image_url"] == {
-        "url": f"file://{image_b}",
+        "url": image_b.resolve().as_uri(),
         "detail": "low",
     }
 
@@ -246,7 +246,7 @@ def test_custom_image_dataset_wraps_interleaved_content_for_multimodal_chat(
             "role": "user",
             "content": [
                 {"type": "text", "text": "Describe "},
-                {"type": "image_url", "image_url": {"url": f"file://{image}"}},
+                {"type": "image_url", "image_url": {"url": image.resolve().as_uri()}},
             ],
         }
     ]
@@ -262,11 +262,32 @@ def test_custom_image_dataset_wraps_interleaved_content_for_multimodal_chat(
 
 
 @pytest.mark.benchmark
+@pytest.mark.parametrize("relative", [False, True])
+def test_process_image_local_path_uses_file_uri(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative: bool,
+) -> None:
+    image = tmp_path / "chart #100%.png"
+    monkeypatch.chdir(tmp_path)
+    image_input = image.name if relative else str(image)
+
+    result = datasets_module.process_image(image_input)
+
+    assert result == {
+        "type": "image_url",
+        "image_url": {"url": image.resolve().as_uri()},
+    }
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("image_name", ["chart_a.png", "chart #100%.png"])
 def test_custom_image_dataset_encodes_image_media_when_requested(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    image_name: str,
 ) -> None:
-    image_a = tmp_path / "chart_a.png"
+    image_a = tmp_path / image_name
     image_b = tmp_path / "chart b.png"
     _write_png(image_a, color=(255, 0, 0))
     _write_png(image_b, color=(0, 255, 0))

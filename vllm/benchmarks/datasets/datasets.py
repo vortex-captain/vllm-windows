@@ -391,7 +391,7 @@ def process_image(
     3. String input: - Treats the string as a URL, local file path, or base64
        encoded data.  - If string starts with "data:image/", treats as base64.
        - If string starts with "http://", "https://", or "file://", treats as URL.
-       - Otherwise treats as local file path and prepends "file://".
+       - Otherwise resolves the local file path and converts it to a file URI.
        - If ensure_client_side_data is True, local and HTTP(S) image references
          are loaded and encoded as base64 image data URLs. Existing data:image
          URLs are kept unchanged.
@@ -417,7 +417,7 @@ def process_image(
         image_url = (
             image
             if image.startswith(("http://", "https://", "file://", "data:image/"))
-            else f"file://{image}"
+            else Path(image).resolve().as_uri()
         )
 
         if ensure_client_side_data and not image_url.startswith("data:image/"):
