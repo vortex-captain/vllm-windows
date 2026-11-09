@@ -77,7 +77,6 @@ cached and keep loading from disk in the engine.
 """
 
 import contextlib
-import fcntl
 import gc
 import itertools
 import multiprocessing
@@ -85,6 +84,11 @@ import os
 import select
 import socket
 from collections.abc import Callable
+
+if os.name == "nt":
+    from vllm.utils import _windows_fcntl as fcntl
+else:
+    import fcntl
 
 import torch
 
