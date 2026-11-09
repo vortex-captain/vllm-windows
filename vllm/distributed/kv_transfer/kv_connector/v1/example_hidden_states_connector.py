@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import fcntl
 import os
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import partial
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Any
+
+if os.name == "nt":
+    from vllm.utils import _windows_fcntl as fcntl
+else:
+    import fcntl
 
 import torch
 from packaging.version import Version
