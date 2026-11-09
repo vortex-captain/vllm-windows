@@ -14,7 +14,7 @@ param(
     [string]$CMakeCudaArchitectures = "120-real;103-real",
     [ValidateRange(1, 256)]
     [int]$MaxJobs = 8,
-    [string]$VersionOverride = "0.33.0rc1.dev476+gb10a8c2c8.cu134",
+    [string]$VersionOverride = "0.33.0rc1.dev476+gb10a8c2c8.cu135",
     [string]$PerlPath = "",
     [string]$ProtocPath = "",
     [string]$ProtocIncludePath = "",
@@ -23,8 +23,8 @@ param(
 )
 
 # This script expects VenvDir to be provisioned already. Install the local
-# Windows ARM64 Torch wheel built for CUDA 13.4 separately; no compatible public
-# PyPI Torch wheel is assumed. The remaining PyPI build packages are:
+# Windows ARM64 Torch wheel matching the selected CUDA toolkit separately; no
+# compatible public PyPI Torch wheel is assumed. The remaining build packages are:
 # cmake>=3.26.1, ninja, packaging>=24.2, setuptools>=77.0.3,<81.0.0,
 # setuptools-scm>=8, setuptools-rust>=1.9.0, wheel, jinja2>=3.1.6, regex,
 # build, protobuf, Rust 1.95+, and a full Perl distribution for vendored
@@ -479,11 +479,22 @@ function Set-BuildEnvironment {
     Initialize-CudaIncludeOverlay
 
     $pythonInfo = & $python -c @"
+import os
+import re
+import subprocess
 import sysconfig
 import torch
 
 assert sysconfig.get_platform() == "win-arm64"
-assert torch.version.cuda == "13.4"
+nvcc_version = subprocess.check_output(
+    [os.path.join(os.environ["CUDA_HOME"], "bin", "nvcc.exe"), "--version"],
+    text=True,
+)
+cuda_release = re.search(r"\brelease (\d+\.\d+)", nvcc_version)
+if cuda_release is None:
+    raise RuntimeError("Unable to determine the selected CUDA toolkit version.")
+if torch.version.cuda != cuda_release.group(1):
+    raise RuntimeError("Torch CUDA version does not match the selected toolkit.")
 print(f"torch={torch.__version__}")
 print(f"torch_cuda={torch.version.cuda}")
 "@
