@@ -1,0 +1,21 @@
+diff --git a/flash_attn/cute/cache_utils.py b/flash_attn/cute/cache_utils.py
+--- a/flash_attn/cute/cache_utils.py
++++ b/flash_attn/cute/cache_utils.py
+@@ -1,5 +1,4 @@
+ # Manage Ahead-of-Time (AOT) compiled kernels
+-import fcntl
+ import hashlib
+ import os
+ import pickle
+@@ -12,6 +11,11 @@
+ from typing import Hashable, TypeAlias
+ 
+ import ctypes
+ 
++if os.name == "nt":
++    from vllm.utils import _windows_fcntl as fcntl
++else:
++    import fcntl
++
+ import cutlass
+ import cutlass.cute as cute

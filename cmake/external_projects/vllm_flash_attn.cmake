@@ -92,6 +92,13 @@ endif()
 FetchContent_MakeAvailable(vllm-flash-attn)
 message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
 
+if(WIN32)
+  vllm_apply_patch(
+    "vLLM FlashAttention Windows file locks"
+    "${vllm-flash-attn_SOURCE_DIR}"
+    "${CMAKE_CURRENT_LIST_DIR}/../patches/vllm-flash-attn-windows-file-lock.patch")
+endif()
+
 # After MakeAvailable, also force the flag onto the actual targets in case
 # the subproject's CMakeLists.txt overrides CMAKE_CUDA_FLAGS with its own
 # target_compile_options.
