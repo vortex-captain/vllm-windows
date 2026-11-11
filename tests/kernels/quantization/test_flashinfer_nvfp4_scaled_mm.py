@@ -3,13 +3,13 @@
 import pytest
 import torch
 import torch.nn.functional as F
-from nvfp4_utils import (
+
+from tests.kernels.quantization.nvfp4_utils import (
     FLOAT4_E2M1_MAX,
     FLOAT8_E4M3_MAX,
     convert_swizzled_to_linear,
     dequantize_nvfp4_to_dtype,
 )
-
 from vllm import _custom_ops as ops
 from vllm.model_executor.kernels.linear.nvfp4 import NvFp4LinearLayerConfig
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (

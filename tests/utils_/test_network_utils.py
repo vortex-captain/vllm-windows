@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import multiprocessing
 import socket
 import threading
 
@@ -238,18 +239,102 @@ def test_make_zmq_socket_adopts_listener(tmp_path, scheme):
 
 
 def test_make_zmq_listener_failed_ipc_bind_keeps_existing_path(tmp_path):
+    family = getattr(socket, "AF_UNIX", None)
+    if family is None:
+        pytest.fail("Unix-domain socket paths are not supported on this platform")
     path = tmp_path / "taken.sock"
-    owner = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    owner = socket.socket(family, socket.SOCK_STREAM)
     owner.bind(str(path))
     owner.listen()
     try:
         with pytest.raises(OSError, match="Address already in use"):
             make_zmq_listener(f"ipc://{path}", zmq.ROUTER)
 
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        with socket.socket(family, socket.SOCK_STREAM) as client:
             client.connect(str(path))
     finally:
         owner.close()
+
+
+def test_make_zmq_listener_reports_missing_unix_socket_support(tmp_path, monkeypatch):
+    monkeypatch.delattr(socket, "AF_UNIX", raising=False)
+    with pytest.raises(NotImplementedError, match="IPC.*AF_UNIX"):
+        make_zmq_listener(f"ipc://{tmp_path}/unsupported.sock", zmq.ROUTER)
+    assert not list(tmp_path.iterdir())
+
+
+def test_failed_zmq_adoption_preserves_listener_ownership(monkeypatch):
+    listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
+    original_fd = listener.socket.fileno()
+    failed_sockets = []
+    set_option = zmq.Socket.setsockopt
+
+    def reject_adoption(sock, option, value):
+        if option == zmq.USE_FD:
+            failed_sockets.append(sock)
+            raise zmq.ZMQError(zmq.ENOTSUP)
+        return set_option(sock, option, value)
+
+    monkeypatch.setattr(zmq.Socket, "setsockopt", reject_adoption)
+    try:
+        with zmq.Context() as ctx:
+            with pytest.raises(zmq.ZMQError):
+                make_zmq_socket(
+                    ctx, listener.address, zmq.ROUTER, listener=listener.socket
+                )
+            assert listener.socket.fileno() == original_fd
+            assert len(failed_sockets) == 1
+            assert failed_sockets[0].closed
+            with socket.socket() as competitor, pytest.raises(OSError):
+                competitor.bind(listener.socket.getsockname())
+    finally:
+        listener.cleanup()
+
+
+def _reply_on_inherited_listener(listener, address, ready):
+    with zmq.Context() as ctx:
+        router = make_zmq_socket(ctx, address, zmq.ROUTER, listener=listener)
+        try:
+            router.setsockopt(zmq.RCVTIMEO, 10_000)
+            ready.set()
+            identity, payload = router.recv_multipart()
+            router.send_multipart([identity, payload])
+        finally:
+            router.close(linger=0)
+
+
+def test_spawned_zmq_listener_keeps_endpoint_reserved():
+    """Socket sharing must preserve the bound endpoint after the parent closes it."""
+    listener = make_zmq_listener("tcp://127.0.0.1:0", zmq.ROUTER)
+    address = listener.address
+    ctx = multiprocessing.get_context("spawn")
+    ready = ctx.Event()
+    process = ctx.Process(
+        target=_reply_on_inherited_listener,
+        args=(listener.socket, address, ready),
+    )
+    process.start()
+    listener.close()
+    try:
+        assert ready.wait(30)
+        with socket.socket() as competitor, pytest.raises(OSError):
+            competitor.bind(("127.0.0.1", int(address.rsplit(":", 1)[1])))
+        with (
+            zmq.Context() as zmq_context,
+            make_zmq_socket(
+                zmq_context, address, zmq.DEALER, bind=False, linger=0
+            ) as client,
+        ):
+            client.setsockopt(zmq.RCVTIMEO, 10_000)
+            client.send(b"inherited")
+            assert client.recv() == b"inherited"
+        process.join(10)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.kill()
+        process.join(10)
+        listener.cleanup()
 
 
 def test_make_zmq_path():

@@ -9,13 +9,19 @@ import multiprocessing
 import os
 import socket
 import ssl
+import sys
 from collections import Counter
 
 import pytest
 import uvicorn
-import uvloop
+
+if sys.platform == "win32":
+    import winloop as fast_loop
+else:
+    import uvloop as fast_loop
 
 from vllm.entrypoints.launchers.launcher import NoSignalServer
+from vllm.utils.network_utils import listen_with_backlog
 
 TIMEOUT_S = 30
 
@@ -80,10 +86,18 @@ async def _serve(sock, requests, loads=None, **config_kwargs):
 
 
 def _run(coro, loop_impl):
-    return uvloop.run(coro) if loop_impl == "uvloop" else asyncio.run(coro)
+    if loop_impl != "asyncio":
+        return fast_loop.run(coro)
+    if sys.platform == "win32":
+        # Balanced accepts use add_reader, not Proactor's IOCP accepts.
+        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+            return runner.run(coro)
+    return asyncio.run(coro)
 
 
-@pytest.mark.parametrize("loop_impl", ["asyncio", "uvloop"])
+@pytest.mark.parametrize(
+    "loop_impl", ["asyncio", "winloop" if sys.platform == "win32" else "uvloop"]
+)
 def test_requests_and_keep_alive_served(loop_impl):
     async def requests(port, server):
         return await _get(port), await _get(port, requests=3)
@@ -138,7 +152,7 @@ def test_tls_handshake_failure_keeps_serving(tmp_path):
         writer.close()
         return await _get(port, ssl_ctx=client_ctx)
 
-    bodies = uvloop.run(
+    bodies = fast_loop.run(
         _serve(_bound_socket(), requests, ssl_keyfile=keyfile, ssl_certfile=certfile)
     )
     assert bodies == [str(os.getpid()).encode()]
@@ -155,7 +169,7 @@ def test_busier_worker_still_serves():
         writer.close()
         return bodies
 
-    assert uvloop.run(_serve(_bound_socket(), requests, loads)) == [
+    assert fast_loop.run(_serve(_bound_socket(), requests, loads)) == [
         str(os.getpid()).encode()
     ]
 
@@ -172,8 +186,8 @@ def _worker(sock, loads, index, ready, stop):
         server.should_exit = True
         await task
 
-    # API workers run on uvloop, whose own server accepts a whole burst at once.
-    uvloop.run(main())
+    # Exercise the same fast event loop used by API workers.
+    fast_loop.run(main())
 
 
 @pytest.mark.skipif((os.cpu_count() or 1) < 8, reason="needs idle cores per worker")
@@ -183,6 +197,8 @@ def test_connections_balanced_over_workers(arrival_s):
     the event loop's own server one worker takes most of either."""
     workers, connections = 4, 400
     sock = _bound_socket()
+    if sys.platform == "win32":
+        listen_with_backlog(sock)
     ctx = multiprocessing.get_context("spawn")
     ready, stop = ctx.Semaphore(0), ctx.Event()
     loads = ctx.RawArray("i", workers)
@@ -205,7 +221,7 @@ def test_connections_balanced_over_workers(arrival_s):
             results = await asyncio.gather(*(get_after(d) for d in delays))
             return Counter(body for (body,) in results)
 
-        counts = uvloop.run(arrive())
+        counts = fast_loop.run(arrive())
         assert sum(counts.values()) == connections
         # Fair share is 100.
         assert max(counts.values()) <= 5 * connections // (4 * workers), counts

@@ -10,9 +10,9 @@ import stat
 import sys
 import tempfile
 from argparse import Namespace
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from http import HTTPStatus
-from io import BytesIO, StringIO
+from io import BytesIO, StringIO, UnsupportedOperation
 from pathlib import Path
 from typing import IO, Any, NoReturn, TypeAlias, TypedDict
 from urllib.parse import urlparse
@@ -360,31 +360,35 @@ def is_url(path_or_url: str) -> bool:
     return urlparse(path_or_url).scheme in ("http", "https")
 
 
-def staging_file(tmp_dir: str | None, prefix: str) -> IO[str]:
+@contextlib.contextmanager
+def staging_file(tmp_dir: str | None, prefix: str) -> Iterator[IO[str]]:
     """In-memory buffer, or a temporary file when a directory is given."""
     if tmp_dir is None:
-        return StringIO()
-    return tempfile.NamedTemporaryFile(
-        mode="w+",
-        encoding="utf-8",
-        newline="\n",
-        dir=tmp_dir,
-        prefix=prefix,
-        suffix=".jsonl",
-    )
+        with StringIO() as buffer:
+            yield buffer
+        return
+    # Uploads reopen this path while the writer is still open.
+    with (
+        tempfile.TemporaryDirectory(dir=tmp_dir, prefix=prefix) as directory,
+        open(
+            Path(directory, "batch.jsonl"), "w+", encoding="utf-8", newline="\n"
+        ) as staged,
+    ):
+        yield staged
 
 
 @contextlib.asynccontextmanager
 async def open_batch_input(
-    path_or_url: str, tmp_dir: str | None
+    path_or_url: str | IO[str], tmp_dir: str | None
 ) -> AsyncIterator[IO[str]]:
     """Yield the batch as a seekable text file, so it can be read twice.
 
     A non-seekable source is staged via `staging_file`. A URL is downloaded to
     a file, since the in-memory fetch is capped at the media download limit.
+    Caller-supplied text streams remain open when the context exits.
     """
     with contextlib.ExitStack() as stack:
-        if is_url(path_or_url):
+        if isinstance(path_or_url, str) and is_url(path_or_url):
             download_dir = stack.enter_context(
                 tempfile.TemporaryDirectory(dir=tmp_dir, prefix="tmp_batch_input_")
             )
@@ -402,8 +406,17 @@ async def open_batch_input(
             return
 
         # JSON allows a bare "\r" as whitespace, so split lines on "\n" only.
-        source = stack.enter_context(open(path_or_url, encoding="utf-8", newline="\n"))
-        if source.seekable():
+        source = (
+            stack.enter_context(open(path_or_url, encoding="utf-8", newline="\n"))
+            if isinstance(path_or_url, str)
+            else path_or_url
+        )
+        # Windows CRT pipes can report seekable even though seek cannot rewind them.
+        try:
+            is_pipe = stat.S_ISFIFO(os.fstat(source.fileno()).st_mode)
+        except UnsupportedOperation:
+            is_pipe = False
+        if source.seekable() and not is_pipe:
             yield source
             return
 
@@ -497,7 +510,7 @@ async def batch_output_writer(
     """
     if not is_url(path_or_url):
         logger.info("Writing outputs to local file %s", path_or_url)
-        with open(path_or_url, "w", encoding="utf-8") as f:
+        with open(path_or_url, "w", encoding="utf-8", newline="\n") as f:
             yield f
         return
 

@@ -261,6 +261,13 @@ See [vllm download-kernels](./download-kernels.md) for the full reference of all
 
 Run batch prompts and write results to file.
 
+Batch files are UTF-8 JSONL; output uses LF line endings on every platform.
+On Windows, close temporary input/output file handles before launching the CLI.
+URL output staging supports reopening its temporary file for upload on Windows.
+Python callers of `open_batch_input` can also supply an open UTF-8 text stream,
+including an anonymous pipe: non-seekable input is staged for both passes without
+requiring `/dev/fd`, and the caller retains ownership of the supplied stream.
+
 Running with a local file:
 
 ```bash

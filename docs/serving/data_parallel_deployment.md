@@ -12,6 +12,22 @@ By default, expert layers form a tensor parallel group of size `DP × TP`. To us
 
 In vLLM, each DP rank is deployed as a separate "core engine" process that communicates with front-end process(es) via ZMQ sockets. Data Parallel attention can be combined with Tensor Parallel attention, in which case each DP engine owns a number of per-GPU worker processes equal to the configured TP size.
 
+On Windows, frontend ZMQ listeners use TCP with inherited socket handles; the
+supervisor keeps each endpoint reserved while transferring it to a child.
+Inherited IPC listeners require Python's `socket.AF_UNIX` and fail explicitly
+when it is unavailable.
+
+Shared HTTP sockets start listening before their Windows handles are duplicated.
+The listener uses Winsock's `SOMAXCONN_HINT` for backlogs above 200, preserving the
+requested burst capacity rather than Winsock's smaller default queue.
+
+The multi-port DP supervisor on Windows owns its child process trees with a
+Windows Job Object before allowing the child server to start. Shutdown requests
+travel over an owned control pipe so each child invokes its local signal handler
+and can drain within the configured shutdown timeout. After that deadline, or
+when the roots have exited, the supervisor terminates the job to reap any
+remaining descendants. Job termination is forced cleanup, not graceful draining.
+
 For MoE models, when any requests are in progress in any rank, we must ensure that empty "dummy" forward passes are performed in all ranks that don't currently have any requests scheduled. This is handled via a separate DP Coordinator process that communicates with all ranks, and a collective operation performed every N steps to determine when all ranks become idle and can be paused. When TP is used in conjunction with DP, expert layers form a group of size `DP × TP` (using either tensor parallelism by default, or expert parallelism if `--enable-expert-parallel` is set).
 
 In all cases, it is beneficial to load-balance requests between DP ranks. For online deployments, this balancing can be optimized by taking into account the state of each DP engine - in particular its currently scheduled and waiting (queued) requests, and KV cache state. Each DP engine has an independent KV cache, and the benefit of prefix caching can be maximized by directing prompts intelligently.

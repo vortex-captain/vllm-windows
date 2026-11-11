@@ -26,7 +26,12 @@ from vllm.entrypoints.common.startup import (
 from vllm.entrypoints.launchers.utils.ssl import SSLCertRefresher
 from vllm.logger import init_logger
 from vllm.tracing import instrument
-from vllm.utils.network_utils import find_process_using_port, is_valid_ipv6_address
+from vllm.utils.network_utils import (
+    find_process_using_port,
+    is_valid_ipv6_address,
+    listen_with_backlog,
+)
+from vllm.utils.subprocess_utils import register_shutdown_signal
 from vllm.utils.system_utils import set_ulimit
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -92,7 +97,10 @@ class NoSignalServer(uvicorn.Server):
             return
         self._publish_load()
         for sock in sockets:
-            sock.listen(self.config.backlog)
+            if sys.platform != "win32" or not sock.getsockopt(
+                socket.SOL_SOCKET, socket.SO_ACCEPTCONN
+            ):
+                listen_with_backlog(sock, self.config.backlog)
             sock.setblocking(False)
             self._track(self._accept(sock))
 
@@ -260,10 +268,17 @@ async def serve_http(
     async def dummy_shutdown() -> None:
         pass
 
-    loop.add_signal_handler(signal.SIGINT, signal_handler)
-    loop.add_signal_handler(signal.SIGTERM, signal_handler)
+    shutdown_handlers = contextlib.ExitStack()
     if sys.platform == "win32":
-        loop.add_signal_handler(signal.SIGBREAK, signal_handler)
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGBREAK):
+            shutdown_handlers.enter_context(
+                register_shutdown_signal(
+                    sig, lambda _sig, _frame: loop.call_soon_threadsafe(signal_handler)
+                )
+            )
+    else:
+        loop.add_signal_handler(signal.SIGINT, signal_handler)
+        loop.add_signal_handler(signal.SIGTERM, signal_handler)
 
     async def handle_shutdown() -> None:
         await shutdown_event.wait()
@@ -312,6 +327,7 @@ async def serve_http(
         shutdown_task.cancel()
         if watchdog_task is not None:
             watchdog_task.cancel()
+        shutdown_handlers.close()
 
 
 async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):
@@ -359,7 +375,10 @@ def create_server_socket(
 
 
 def create_server_unix_socket(path: str) -> socket.socket:
-    sock = socket.socket(family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+    family = getattr(socket, "AF_UNIX", None)
+    if family is None:
+        raise NotImplementedError("Unix-domain server sockets require AF_UNIX support")
+    sock = socket.socket(family=family, type=socket.SOCK_STREAM)
     sock.bind(path)
     return sock
 

@@ -12,9 +12,11 @@ import multiprocessing
 import os
 import platform
 import signal
+import sys
 import time
 from functools import partial
 from http import HTTPStatus
+from multiprocessing.connection import _ConnectionBase
 from multiprocessing.process import BaseProcess
 
 import aiohttp
@@ -23,6 +25,7 @@ import uvicorn
 
 if platform.system() == "Windows":
     import winloop as uvloop_impl
+
     # Windows does not support fork
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     # Disable libuv on Windows by default
@@ -34,6 +37,11 @@ from fastapi import FastAPI, Response
 
 import vllm.envs as envs
 from vllm.logger import configure_logging_from_args, init_logger
+from vllm.utils.subprocess_utils import (
+    WindowsJob,
+    register_shutdown_signal,
+    start_process_in_group,
+)
 from vllm.utils.system_utils import (
     decorate_logs,
     kill_process_tree,
@@ -263,10 +271,6 @@ def _run_vllm_dp_server(child_args: argparse.Namespace) -> None:
     """Entrypoint function for the vLLM DP Server."""
     configure_logging_from_args(child_args)
 
-    # Create a fresh process group for the vLLM DP Server,
-    # so that CTRL-C is propagated cleanly.
-    os.setpgrp()
-
     name = f"APIServer_DP{child_args.data_parallel_rank}"
     set_process_title(name)
     decorate_logs(name)
@@ -287,6 +291,8 @@ class DPSupervisor:
         ]
         self._is_ready = False
         self._processes: list[BaseProcess] = []
+        self._job: WindowsJob | None = None
+        self._shutdown_senders: dict[int, _ConnectionBase] = {}
         self._shutdown_event = asyncio.Event()
         self._shutdown_signal = signal.SIGTERM
 
@@ -299,8 +305,19 @@ class DPSupervisor:
         decorate_logs("DPSupervisor")
 
         # K8s sends SIGTERM for shutdown - begin graceful termination.
+        shutdown_handlers = contextlib.ExitStack()
         for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, partial(self._handle_signal, sig))
+            if sys.platform == "win32":
+                shutdown_handlers.enter_context(
+                    register_shutdown_signal(
+                        sig,
+                        lambda signum, _frame: loop.call_soon_threadsafe(
+                            self._handle_signal, signum
+                        ),
+                    )
+                )
+            else:
+                loop.add_signal_handler(sig, partial(self._handle_signal, sig))
 
         supervisor_server: uvicorn.Server | None = None
         supervisor_server_task: asyncio.Task[None] | None = None
@@ -321,12 +338,15 @@ class DPSupervisor:
             await monitor_task
         finally:
             self._is_ready = False
-            await self._shutdown_children()
+            try:
+                await self._shutdown_children()
 
-            # Shutdown the DP Supervisor server.
-            if supervisor_server is not None and supervisor_server_task is not None:
-                supervisor_server.should_exit = True
-                await supervisor_server_task
+                # Shutdown the DP Supervisor server.
+                if supervisor_server is not None and supervisor_server_task is not None:
+                    supervisor_server.should_exit = True
+                    await supervisor_server_task
+            finally:
+                shutdown_handlers.close()
 
     async def _start_server(self) -> tuple[uvicorn.Server, asyncio.Task[None]]:
         """Launch the DPSupervisor HTTP server.
@@ -406,17 +426,33 @@ class DPSupervisor:
 
     def _start_children(self) -> None:
         """Launch vLLM DP Servers on separate GPUs."""
+        if sys.platform == "win32":
+            self._job = WindowsJob()
         logger.info("Launching vLLM DP Servers")
         context = multiprocessing.get_context("spawn")
         for local_rank in range(self.args.data_parallel_size_local):
             child_args = _build_vllm_dp_server_args(self.args, local_rank)
-            process = context.Process(
-                target=_run_vllm_dp_server,
-                name=f"APIServer_DPRank_{child_args.data_parallel_rank}",
-                args=(child_args,),
-            )
-            process.start()
+            receive, send = context.Pipe(duplex=False) if self._job else (None, None)
+            try:
+                process = start_process_in_group(
+                    context,
+                    _run_vllm_dp_server,
+                    name=f"APIServer_DPRank_{child_args.data_parallel_rank}",
+                    args=(child_args,),
+                    job=self._job,
+                    shutdown_control=receive,
+                )
+            except BaseException:
+                if send is not None:
+                    send.close()
+                raise
+            finally:
+                if receive is not None:
+                    receive.close()
             self._processes.append(process)
+            if send is not None:
+                assert process.pid is not None
+                self._shutdown_senders[process.pid] = send
 
     async def _probe_all_children(self) -> None:
         """Background coroutine: probes all child endpoints on each interval.
@@ -540,6 +576,12 @@ class DPSupervisor:
                 pid = process.pid
                 if not process.is_alive() or pid is None:
                     continue
+                if self._job is not None:
+                    try:
+                        self._shutdown_senders[pid].send(int(self._shutdown_signal))
+                    except BrokenPipeError:
+                        logger.warning("DP server %s closed its shutdown pipe.", pid)
+                    continue
                 with contextlib.suppress(ProcessLookupError, OSError):
                     os.kill(pid, self._shutdown_signal)
 
@@ -551,6 +593,24 @@ class DPSupervisor:
                 logger.warning("Shutdown await cancelled")
                 raise
         finally:
+            if self._job is not None:
+                try:
+                    if any(process.is_alive() for process in self._processes):
+                        logger.warning(
+                            "DP servers did not exit within %.1fs; "
+                            "terminating their Windows job.",
+                            timeout,
+                        )
+                    self._job.close(CHILD_EXIT_GRACE_S)
+                    await asyncio.to_thread(
+                        _join_processes_with_timeout,
+                        self._processes,
+                        CHILD_EXIT_GRACE_S,
+                    )
+                finally:
+                    for sender in self._shutdown_senders.values():
+                        sender.close()
+                    self._shutdown_senders.clear()
             for process in self._processes:
                 pid = process.pid
                 if not process.is_alive() or pid is None:

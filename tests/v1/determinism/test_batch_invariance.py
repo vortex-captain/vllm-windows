@@ -7,7 +7,9 @@ import random
 import pytest
 import torch
 from transformers import AutoTokenizer
-from utils import (
+
+import vllm.envs as envs
+from tests.v1.determinism.utils import (
     BACKENDS,
     TEST_MODEL,
     _extract_step_logprobs,
@@ -16,8 +18,6 @@ from utils import (
     skip_if_not_cuda_alike,
     skip_unsupported,
 )
-
-import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.inputs import TokensPrompt
 from vllm.platforms import current_platform

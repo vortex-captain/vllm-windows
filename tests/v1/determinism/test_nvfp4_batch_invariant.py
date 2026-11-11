@@ -6,12 +6,12 @@ import random
 
 import pytest
 import torch
-from utils import (
+
+from tests.v1.determinism.utils import (
     _extract_step_logprobs,
     _random_prompt,
     skip_if_not_cuda_alike,
 )
-
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 

@@ -5,8 +5,9 @@ import json
 import math
 import os
 import stat
+import sys
 from pathlib import Path
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Literal, NoReturn, Self, TypeAlias
 
 from pydantic import (
     BaseModel,
@@ -27,6 +28,30 @@ class SnapshotCompatibilityError(RuntimeError):
 
 class SnapshotSecurityError(RuntimeError):
     """The snapshot artifact does not meet the private-path contract."""
+
+
+# Unsupported-platform guards never return, including for static analysis.
+if sys.platform == "linux":
+    _LinuxSnapshotReturn: TypeAlias = None
+else:
+    _LinuxSnapshotReturn: TypeAlias = NoReturn
+if sys.platform == "win32":
+    _SnapshotFilesystemReturn: TypeAlias = NoReturn
+else:
+    _SnapshotFilesystemReturn: TypeAlias = None
+
+
+def require_linux_snapshot() -> _LinuxSnapshotReturn:
+    if sys.platform != "linux":
+        raise NotImplementedError("Snapshot process operations require Linux.")
+
+
+def _require_snapshot_filesystem() -> _SnapshotFilesystemReturn:
+    if sys.platform == "win32":
+        raise NotImplementedError(
+            "Snapshot artifact operations require POSIX ownership, permissions "
+            "and directory fsync; these cannot be validated on Windows."
+        )
 
 
 _MAX_PID = 2**31 - 1
@@ -156,6 +181,7 @@ def _is_trusted_sticky_directory(path_stat: os.stat_result) -> bool:
 
 def validate_artifact_root(path: Path, *, creating: bool) -> None:
     """Validate that an artifact path cannot be replaced by another user."""
+    _require_snapshot_filesystem()
     path = Path(os.path.abspath(path))
     if path.is_symlink():
         raise SnapshotSecurityError(f"snapshot path is a symlink: {path}")
@@ -203,6 +229,7 @@ def _validation_path(error: ValidationError) -> str:
 
 
 def _fsync_directory(path: Path) -> None:
+    _require_snapshot_filesystem()
     directory_fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(directory_fd)
@@ -211,6 +238,7 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _write_json_atomic(path: Path, payload: object, *, overwrite: bool = False) -> None:
+    _require_snapshot_filesystem()
     temporary = path.with_name(f"{path.name}.tmp")
     if overwrite:
         temporary.unlink(missing_ok=True)

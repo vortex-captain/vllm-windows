@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import json
 import multiprocessing
+import os
 import platform
 import threading
 import time
@@ -24,9 +25,10 @@ from typing import (
 )
 
 import torch
-import os
+
 if platform.system() == "Windows":
     import winloop as uvloop_impl
+
     # Windows does not support fork
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -39,7 +41,12 @@ from torch.autograd.profiler import record_function
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
-from vllm.utils.network_utils import ZmqListener, get_open_zmq_ipc_path, get_tcp_uri
+from vllm.utils.network_utils import (
+    ZmqListener,
+    get_open_zmq_ipc_path,
+    get_tcp_uri,
+    listen_with_backlog,
+)
 from vllm.utils.subprocess_utils import popen_with_inherited_sockets
 from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
 from vllm.utils.torch_utils import PIN_MEMORY
@@ -235,6 +242,9 @@ class APIServerProcessManager:
         listeners = [*input_listeners, *output_listeners]
         self._listeners = listeners
         try:
+            if num_servers > 1 and platform.system() == "Windows":
+                # Winsock listeners must be listening before handle duplication.
+                listen_with_backlog(sock)
             listener_pairs = zip(
                 range(num_servers), input_listeners, output_listeners, strict=True
             )
@@ -403,6 +413,8 @@ class RustFrontendProcessManager:
             _shutdown_subprocesses_and_cleanup_listeners(
                 self.processes, self._listeners, timeout=timeout
             )
+
+
 class _SubprocessWrapper:
     """Wraps subprocess.Popen to provide the BaseProcess-like interface
     needed by wait_for_completion_or_failure."""
@@ -411,8 +423,8 @@ class _SubprocessWrapper:
         self._proc = proc
         self.name = name
         self.pid = proc.pid
-        self._sentinel_conn: connection.Connection | None = None
-        self._sentinel_send: connection.Connection | None = None
+        self._sentinel_conn: connection._ConnectionBase | None = None
+        self._sentinel_send: connection._ConnectionBase | None = None
 
         # Use a Pipe-based sentinel so subprocess monitoring works uniformly
         # across platforms with multiprocessing.connection.wait().
@@ -578,7 +590,11 @@ def wait_for_completion_or_failure(
         # Check if any process terminates
         while sentinel_to_proc:
             # Wait for any process to terminate (or engine shutdown signal)
-            ready_sentinels: list[Any] = connection.wait(sentinel_to_proc)
+            # Windows control requests can queue a main-thread Python signal.
+            ready_sentinels: list[Any] = connection.wait(
+                sentinel_to_proc,
+                timeout=1.0 if platform.system() == "Windows" else None,
+            )
 
             # Process any terminated processes
             for sentinel in ready_sentinels:

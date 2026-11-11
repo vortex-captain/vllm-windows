@@ -9,8 +9,8 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image
-from utils import _extract_step_logprobs, skip_if_not_cuda_alike
 
+from tests.v1.determinism.utils import _extract_step_logprobs, skip_if_not_cuda_alike
 from vllm import LLM, SamplingParams
 from vllm.inputs import TextPrompt
 

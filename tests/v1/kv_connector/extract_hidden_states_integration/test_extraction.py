@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import sys
 import tempfile
 
 import pytest
@@ -93,7 +94,9 @@ def test_extract_hidden_states_with_predictable_dummy_model(
        include_output_tokens — verifies per-request kv_transfer_params
        plumbing.
     """
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+    monkeypatch.setenv(
+        "VLLM_WORKER_MULTIPROC_METHOD", "spawn" if sys.platform == "win32" else "fork"
+    )
 
     layer_ids = [5, 2, 10]
     expected_layer_ids = sorted(layer_ids)

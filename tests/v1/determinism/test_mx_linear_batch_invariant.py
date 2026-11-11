@@ -4,8 +4,8 @@
 
 import pytest
 import torch
-from utils import requires_mx
 
+from tests.v1.determinism.utils import requires_mx
 from vllm.utils.torch_utils import set_random_seed
 
 SEED = 0

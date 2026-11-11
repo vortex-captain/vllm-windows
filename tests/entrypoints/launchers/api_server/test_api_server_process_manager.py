@@ -4,6 +4,7 @@
 import multiprocessing
 import os
 import socket
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -74,6 +75,7 @@ def _adopt_zmq_listener_worker(listen_address, sock, args, client_config):
 def api_server_args():
     """Fixture to provide arguments for APIServerProcessManager."""
     sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
     return {
         "target_server_fn": mock_run_api_server_worker,
         "listen_address": "localhost:8000",
@@ -142,12 +144,15 @@ def test_api_server_process_manager_init(api_server_args, with_stats_update):
 def _assert_endpoint_reserved(address: str) -> None:
     """A competing bind must fail while the endpoint has a listener owner."""
     if address.startswith("ipc://"):
-        competitor = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        family = getattr(socket, "AF_UNIX", None)
+        if family is None:
+            pytest.fail("Unix-domain socket paths are not supported on this platform")
+        competitor = socket.socket(family, socket.SOCK_STREAM)
         bind_address: str | tuple[str, int] = address.removeprefix("ipc://")
     else:
         competitor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         bind_address = ("127.0.0.1", int(address.rsplit(":", 1)[1]))
-    with competitor, pytest.raises(OSError, match="Address already in use"):
+    with competitor, pytest.raises(OSError):
         competitor.bind(bind_address)
 
 
@@ -564,7 +569,12 @@ def test_rust_frontend_inherits_grpc_listener(monkeypatch):
         grpc_fd = grpc_sock.fileno()
         flag_index = cmd.index("--grpc-listen-fd")
         assert cmd[flag_index + 1] == str(grpc_fd)
-        assert list(kwargs["pass_fds"]) == [
+        inherited = (
+            kwargs["startupinfo"].lpAttributeList["handle_list"]
+            if sys.platform == "win32"
+            else kwargs["pass_fds"]
+        )
+        assert list(inherited) == [
             sock.fileno(),
             input_fd,
             output_fd,

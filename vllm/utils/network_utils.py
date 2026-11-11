@@ -49,6 +49,28 @@ def close_sockets(sockets: Sequence[zmq.Socket | zmq.asyncio.Socket]):
             sock.close(linger=0)
 
 
+def listen_with_backlog(sock: socket.socket, backlog: int = 2048) -> None:
+    """Listen without Winsock silently capping a large TCP backlog at 200."""
+    if (
+        sys.platform != "win32"
+        or sock.family not in (socket.AF_INET, socket.AF_INET6)
+        or backlog <= 200
+    ):
+        sock.listen(backlog)
+        return
+
+    import ctypes
+
+    winsock = ctypes.WinDLL("ws2_32")
+    winsock.listen.argtypes = [ctypes.c_size_t, ctypes.c_int]
+    winsock.listen.restype = ctypes.c_int
+    winsock.WSAGetLastError.argtypes = []
+    winsock.WSAGetLastError.restype = ctypes.c_int
+    # SOMAXCONN_HINT(N) is -N; socket.listen() clamps negative values to zero.
+    if winsock.listen(sock.fileno(), -min(backlog, 65535)) != 0:
+        raise ctypes.WinError(winsock.WSAGetLastError())
+
+
 def get_ip() -> str:
     host_ip = envs.VLLM_HOST_IP
     if "HOST_IP" in os.environ and "VLLM_HOST_IP" not in os.environ:
@@ -360,13 +382,13 @@ def make_zmq_socket(
 
     When supplied, ``listener`` is detached and its fd moves to libzmq.
     """
-    socket = ctx.socket(socket_type)
-    buf_size = _get_zmq_socket_buffer_size()
-
     if bind is None:
         bind = socket_type not in (zmq.PUSH, zmq.SUB, zmq.XSUB)
     if listener is not None and not bind:
         raise ValueError("An inherited ZMQ listener requires bind=True")
+
+    socket = ctx.socket(socket_type)
+    buf_size = _get_zmq_socket_buffer_size()
 
     if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
         socket.setsockopt(zmq.RCVHWM, 0)
@@ -390,7 +412,12 @@ def make_zmq_socket(
         socket.setsockopt(zmq.XPUB_VERBOSE, True)
 
     if listener is not None:
-        socket.setsockopt(zmq.USE_FD, listener.detach())
+        try:
+            socket.setsockopt(zmq.USE_FD, listener.fileno())
+        except zmq.ZMQError:
+            socket.close(linger=0)
+            raise
+        listener.detach()
 
     # Determine if the path is a TCP socket with an IPv6 address.
     # Enable IPv6 on the zmq socket if so.
@@ -413,6 +440,11 @@ def make_zmq_listener(path: str, socket_type: Any) -> ZmqListener:
         family = socket.AF_INET6 if is_valid_ipv6_address(host) else socket.AF_INET
         bind_address: str | tuple[str, int] = (host, int(port))
     elif scheme == "ipc":
+        if not hasattr(socket, "AF_UNIX"):
+            raise NotImplementedError(
+                "Inherited ZMQ IPC listeners require socket.AF_UNIX; "
+                "use a TCP listener on this platform."
+            )
         family = socket.AF_UNIX
         bind_address = path.removeprefix("ipc://")
         os.makedirs(os.path.dirname(bind_address), exist_ok=True)
@@ -422,6 +454,8 @@ def make_zmq_listener(path: str, socket_type: Any) -> ZmqListener:
     listener = socket.socket(family, socket.SOCK_STREAM)
     bound = False
     try:
+        if sys.platform == "win32" and scheme == "tcp":
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         buf_size = _get_zmq_socket_buffer_size()
         if buf_size >= 0:
             # Accepted stream sockets inherit these settings from the listener.

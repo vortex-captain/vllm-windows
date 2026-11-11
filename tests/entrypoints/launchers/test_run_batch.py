@@ -4,11 +4,14 @@
 import asyncio
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import threading
 from collections.abc import Generator
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -468,21 +471,24 @@ INPUT_TOOL_CALLING_BATCH = json.dumps(
 )
 
 
+@contextmanager
+def _batch_files(payload: str):
+    with tempfile.TemporaryDirectory() as directory:
+        input_path = Path(directory, "input.jsonl")
+        input_path.write_text(payload, encoding="utf-8", newline="\n")
+        yield input_path, Path(directory, "output.jsonl")
+
+
 def test_empty_file():
-    with (
-        tempfile.NamedTemporaryFile("w") as input_file,
-        tempfile.NamedTemporaryFile("r") as output_file,
-    ):
-        input_file.write("")
-        input_file.flush()
+    with _batch_files("") as (input_file, output_file):
         proc = subprocess.Popen(
             [
                 "vllm",
                 "run-batch",
                 "-i",
-                input_file.name,
+                str(input_file),
                 "-o",
-                output_file.name,
+                str(output_file),
                 "--model",
                 EMBEDDING_MODEL_NAME,
             ],
@@ -491,25 +497,20 @@ def test_empty_file():
         proc.wait()
         assert proc.returncode == 0, f"{proc=}"
 
-        contents = output_file.read()
+        contents = output_file.read_text(encoding="utf-8")
         assert contents.strip() == ""
 
 
 def test_completions():
-    with (
-        tempfile.NamedTemporaryFile("w") as input_file,
-        tempfile.NamedTemporaryFile("r") as output_file,
-    ):
-        input_file.write(INPUT_BATCH)
-        input_file.flush()
+    with _batch_files(INPUT_BATCH) as (input_file, output_file):
         proc = subprocess.Popen(
             [
                 "vllm",
                 "run-batch",
                 "-i",
-                input_file.name,
+                str(input_file),
                 "-o",
-                output_file.name,
+                str(output_file),
                 "--model",
                 CHAT_MODEL_NAME,
             ],
@@ -518,7 +519,7 @@ def test_completions():
         proc.wait()
         assert proc.returncode == 0, f"{proc=}"
 
-        contents = output_file.read()
+        contents = output_file.read_text(encoding="utf-8")
         for line in contents.strip().split("\n"):
             # Ensure that the output format conforms to the openai api.
             # Validation should throw if the schema is wrong.
@@ -527,20 +528,15 @@ def test_completions():
 
 def test_completions_invalid_input():
     """Ensure that we fail when the input doesn't conform to the openai api."""
-    with (
-        tempfile.NamedTemporaryFile("w") as input_file,
-        tempfile.NamedTemporaryFile("r") as output_file,
-    ):
-        input_file.write(INVALID_INPUT_BATCH)
-        input_file.flush()
+    with _batch_files(INVALID_INPUT_BATCH) as (input_file, output_file):
         proc = subprocess.Popen(
             [
                 "vllm",
                 "run-batch",
                 "-i",
-                input_file.name,
+                str(input_file),
                 "-o",
-                output_file.name,
+                str(output_file),
                 "--model",
                 CHAT_MODEL_NAME,
             ],
@@ -551,20 +547,15 @@ def test_completions_invalid_input():
 
 
 def test_embeddings():
-    with (
-        tempfile.NamedTemporaryFile("w") as input_file,
-        tempfile.NamedTemporaryFile("r") as output_file,
-    ):
-        input_file.write(INPUT_EMBEDDING_BATCH)
-        input_file.flush()
+    with _batch_files(INPUT_EMBEDDING_BATCH) as (input_file, output_file):
         proc = subprocess.Popen(
             [
                 "vllm",
                 "run-batch",
                 "-i",
-                input_file.name,
+                str(input_file),
                 "-o",
-                output_file.name,
+                str(output_file),
                 "--model",
                 EMBEDDING_MODEL_NAME,
             ],
@@ -573,7 +564,7 @@ def test_embeddings():
         proc.wait()
         assert proc.returncode == 0, f"{proc=}"
 
-        contents = output_file.read()
+        contents = output_file.read_text(encoding="utf-8")
         for line in contents.strip().split("\n"):
             # Ensure that the output format conforms to the openai api.
             # Validation should throw if the schema is wrong.
@@ -582,20 +573,15 @@ def test_embeddings():
 
 @pytest.mark.parametrize("input_batch", [INPUT_SCORE_BATCH, INPUT_RERANK_BATCH])
 def test_score(input_batch):
-    with (
-        tempfile.NamedTemporaryFile("w") as input_file,
-        tempfile.NamedTemporaryFile("r") as output_file,
-    ):
-        input_file.write(input_batch)
-        input_file.flush()
+    with _batch_files(input_batch) as (input_file, output_file):
         proc = subprocess.Popen(
             [
                 "vllm",
                 "run-batch",
                 "-i",
-                input_file.name,
+                str(input_file),
                 "-o",
-                output_file.name,
+                str(output_file),
                 "--model",
                 RERANKER_MODEL_NAME,
             ],
@@ -604,7 +590,7 @@ def test_score(input_batch):
         proc.wait()
         assert proc.returncode == 0, f"{proc=}"
 
-        contents = output_file.read()
+        contents = output_file.read_text(encoding="utf-8")
         for line in contents.strip().split("\n"):
             # Ensure that the output format conforms to the openai api.
             # Validation should throw if the schema is wrong.
@@ -618,20 +604,15 @@ def test_score(input_batch):
 
 def test_reasoning_parser():
     """Test that reasoning_parser parameter works correctly in run_batch."""
-    with (
-        tempfile.NamedTemporaryFile("w") as input_file,
-        tempfile.NamedTemporaryFile("r") as output_file,
-    ):
-        input_file.write(INPUT_REASONING_BATCH)
-        input_file.flush()
+    with _batch_files(INPUT_REASONING_BATCH) as (input_file, output_file):
         proc = subprocess.Popen(
             [
                 "vllm",
                 "run-batch",
                 "-i",
-                input_file.name,
+                str(input_file),
                 "-o",
-                output_file.name,
+                str(output_file),
                 "--model",
                 REASONING_MODEL_NAME,
                 "--reasoning-parser",
@@ -642,7 +623,7 @@ def test_reasoning_parser():
         proc.wait()
         assert proc.returncode == 0, f"{proc=}"
 
-        contents = output_file.read()
+        contents = output_file.read_text(encoding="utf-8")
         for line in contents.strip().split("\n"):
             # Ensure that the output format conforms to the openai api.
             # Validation should throw if the schema is wrong.
@@ -662,20 +643,15 @@ def test_reasoning_parser():
 
 
 def test_transcription():
-    with (
-        tempfile.NamedTemporaryFile("w") as input_file,
-        tempfile.NamedTemporaryFile("r") as output_file,
-    ):
-        input_file.write(INPUT_TRANSCRIPTION_BATCH)
-        input_file.flush()
+    with _batch_files(INPUT_TRANSCRIPTION_BATCH) as (input_file, output_file):
         proc = subprocess.Popen(
             [
                 "vllm",
                 "run-batch",
                 "-i",
-                input_file.name,
+                str(input_file),
                 "-o",
-                output_file.name,
+                str(output_file),
                 "--model",
                 SPEECH_LARGE_MODEL_NAME,
             ],
@@ -684,7 +660,7 @@ def test_transcription():
         proc.wait()
         assert proc.returncode == 0, f"{proc=}"
 
-        contents = output_file.read()
+        contents = output_file.read_text(encoding="utf-8")
         print(f"\n\ncontents: {contents}\n\n")
         for line in contents.strip().split("\n"):
             BatchRequestOutput.model_validate_json(line)
@@ -700,20 +676,15 @@ def test_transcription():
 
 
 def test_transcription_http_url():
-    with (
-        tempfile.NamedTemporaryFile("w") as input_file,
-        tempfile.NamedTemporaryFile("r") as output_file,
-    ):
-        input_file.write(INPUT_TRANSCRIPTION_HTTP_BATCH)
-        input_file.flush()
+    with _batch_files(INPUT_TRANSCRIPTION_HTTP_BATCH) as (input_file, output_file):
         proc = subprocess.Popen(
             [
                 "vllm",
                 "run-batch",
                 "-i",
-                input_file.name,
+                str(input_file),
                 "-o",
-                output_file.name,
+                str(output_file),
                 "--model",
                 SPEECH_LARGE_MODEL_NAME,
             ],
@@ -722,7 +693,7 @@ def test_transcription_http_url():
         proc.wait()
         assert proc.returncode == 0, f"{proc=}"
 
-        contents = output_file.read()
+        contents = output_file.read_text(encoding="utf-8")
         for line in contents.strip().split("\n"):
             BatchRequestOutput.model_validate_json(line)
 
@@ -740,20 +711,15 @@ def test_transcription_http_url():
 
 
 def test_translation():
-    with (
-        tempfile.NamedTemporaryFile("w") as input_file,
-        tempfile.NamedTemporaryFile("r") as output_file,
-    ):
-        input_file.write(INPUT_TRANSLATION_BATCH)
-        input_file.flush()
+    with _batch_files(INPUT_TRANSLATION_BATCH) as (input_file, output_file):
         proc = subprocess.Popen(
             [
                 "vllm",
                 "run-batch",
                 "-i",
-                input_file.name,
+                str(input_file),
                 "-o",
-                output_file.name,
+                str(output_file),
                 "--model",
                 SPEECH_SMALL_MODEL_NAME,
             ],
@@ -762,7 +728,7 @@ def test_translation():
         proc.wait()
         assert proc.returncode == 0, f"{proc=}"
 
-        contents = output_file.read()
+        contents = output_file.read_text(encoding="utf-8")
         for line in contents.strip().split("\n"):
             BatchRequestOutput.model_validate_json(line)
 
@@ -783,20 +749,15 @@ def test_tool_calling():
     """Test that tool calling works correctly in run_batch.
     Verifies that requests with tools return tool_calls in the response.
     """
-    with (
-        tempfile.NamedTemporaryFile("w") as input_file,
-        tempfile.NamedTemporaryFile("r") as output_file,
-    ):
-        input_file.write(INPUT_TOOL_CALLING_BATCH)
-        input_file.flush()
+    with _batch_files(INPUT_TOOL_CALLING_BATCH) as (input_file, output_file):
         proc = subprocess.Popen(
             [
                 "vllm",
                 "run-batch",
                 "-i",
-                input_file.name,
+                str(input_file),
                 "-o",
-                output_file.name,
+                str(output_file),
                 "--model",
                 REASONING_MODEL_NAME,
                 "--enable-auto-tool-choice",
@@ -808,7 +769,7 @@ def test_tool_calling():
         proc.wait()
         assert proc.returncode == 0, f"{proc=}"
 
-        contents = output_file.read()
+        contents = output_file.read_text(encoding="utf-8")
         for line in contents.strip().split("\n"):
             if not line.strip():  # Skip empty lines
                 continue
@@ -1146,7 +1107,7 @@ async def test_upload_data_error_includes_awaited_response_body():
 
 def _write_batch(tmp_path, lines: list[str]):
     input_path = tmp_path / "input.jsonl"
-    input_path.write_text("\n".join(lines) + "\n")
+    input_path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return input_path
 
 
@@ -1195,12 +1156,12 @@ async def test_batch_output_writer_persists_before_completion(tmp_path):
     output_path = tmp_path / "output.jsonl"
 
     async with batch_output_writer(str(output_path), None) as output_file:
-        print("first", file=output_file)
+        print("first-\u00e9", file=output_file)
         output_file.flush()
-        assert output_path.read_text() == "first\n"
+        assert output_path.read_bytes() == b"first-\xc3\xa9\n"
         print("second", file=output_file)
 
-    assert output_path.read_text() == "first\nsecond\n"
+    assert output_path.read_bytes() == b"first-\xc3\xa9\nsecond\n"
 
 
 def test_is_same_local_file_detects_aliases(tmp_path):
@@ -1211,9 +1172,6 @@ def test_is_same_local_file_detects_aliases(tmp_path):
     link.symlink_to(target)
     other = tmp_path / "other.jsonl"
     other.write_text("{}\n")
-    fifo = tmp_path / "fifo"
-    os.mkfifo(fifo)
-
     assert is_same_local_file(str(target), str(target))
     assert is_same_local_file(str(target), str(link))
     assert is_same_local_file(str(target), f"{tmp_path}/./batch.jsonl")
@@ -1221,6 +1179,14 @@ def test_is_same_local_file_detects_aliases(tmp_path):
     assert not is_same_local_file(str(target), str(other))
     assert not is_same_local_file(str(target), "https://example.com/output.jsonl")
     assert not is_same_local_file(str(target), str(tmp_path / "missing.jsonl"))
+
+
+def test_is_same_local_file_ignores_fifo(tmp_path):
+    mkfifo = getattr(os, "mkfifo", None)
+    if not callable(mkfifo):
+        raise NotImplementedError("POSIX FIFO paths are not supported on this platform")
+    fifo = tmp_path / "fifo"
+    mkfifo(fifo)
     assert not is_same_local_file(str(fifo), str(fifo))
 
 
@@ -1256,17 +1222,33 @@ async def test_open_batch_input_reads_a_regular_file_in_place(tmp_path):
 @pytest.mark.parametrize("use_tmp_dir", [False, True])
 async def test_open_batch_input_stages_a_stream(tmp_path, use_tmp_dir):
     """A non-seekable input must be staged so the batch can be read twice."""
-    payload = '{"custom_id": "request-1"}\n'
+    payload = '{"custom_id": "request-\u00e9"}\n'
     read_fd, write_fd = os.pipe()
     os.write(write_fd, payload.encode())
     os.close(write_fd)
 
     tmp_dir = str(tmp_path) if use_tmp_dir else None
-    async with open_batch_input(f"/dev/fd/{read_fd}", tmp_dir) as f:
-        assert _read_twice(f) == (payload, payload)
-        staged_files = list(tmp_path.iterdir())
-        assert bool(staged_files) == use_tmp_dir
+    with os.fdopen(read_fd, encoding="utf-8", newline="\n") as source:
+        assert stat.S_ISFIFO(os.fstat(source.fileno()).st_mode)
+        async with open_batch_input(source, tmp_dir) as f:
+            assert _read_twice(f) == (payload, payload)
+            staged_files = list(tmp_path.iterdir())
+            assert bool(staged_files) == use_tmp_dir
+        assert not source.closed
     assert not list(tmp_path.iterdir()), "staged copy must be removed"
+
+
+@pytest.mark.asyncio
+async def test_open_batch_input_cleans_staging_after_invalid_utf8(tmp_path):
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"\xff\n")
+    os.close(write_fd)
+    with os.fdopen(read_fd, encoding="utf-8", newline="\n") as source:
+        with pytest.raises(UnicodeDecodeError):
+            async with open_batch_input(source, str(tmp_path)):
+                pytest.fail("invalid UTF-8 input was accepted")
+        assert not source.closed
+    assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.asyncio
@@ -1280,7 +1262,7 @@ async def test_open_batch_input_downloads_a_url(tmp_path, monkeypatch):
 
     async def fake_download_file(url, save_path, *, timeout, chunk_size):
         downloads.append((url, save_path, timeout))
-        save_path.write_text(payload)
+        save_path.write_text(payload, encoding="utf-8", newline="\n")
         return save_path
 
     monkeypatch.setattr(
