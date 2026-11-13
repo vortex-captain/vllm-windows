@@ -16,6 +16,7 @@ from unittest.mock import create_autospec, patch
 
 import pytest
 
+import vllm.snapshot.manifest as snapshot_manifest
 import vllm.snapshot.runtime as snapshot_runtime
 import vllm.snapshot.server as snapshot_server
 from vllm.entrypoints.cli import snapshot as snapshot_cli
@@ -39,6 +40,7 @@ from vllm.snapshot.manifest import (
     SnapshotRuntimeIdentity,
     SnapshotSecurityError,
     read_manifest,
+    require_linux_snapshot,
     validate_artifact_root,
     validate_identity,
     write_manifest_atomic,
@@ -90,8 +92,9 @@ def test_parse_launch_invalid_component(launch_parser):
 
 def test_cmd_launch_render_calls_run():
     args = argparse.Namespace(model_tag=None, model="test-model")
-    with patch("vllm.entrypoints.cli.launch.uvloop.run") as mock_uvloop_run:
+    with patch("vllm.entrypoints.cli.launch.uvloop_impl.run") as mock_uvloop_run:
         RenderSubcommand.cmd(args)
+        mock_uvloop_run.call_args.args[0].close()
         mock_uvloop_run.assert_called_once()
 
 
@@ -534,6 +537,27 @@ def _runtime_identity(**changes: object) -> Any:
     return SnapshotRuntimeIdentity.model_validate({**payload, **changes}, strict=True)
 
 
+def test_snapshot_models_remain_portable():
+    manifest = _manifest(oracle_text="\u00e9")
+    assert SnapshotManifest.model_validate_json(manifest.model_dump_json()) == manifest
+    validate_identity(manifest, _runtime_identity())
+
+
+@pytest.mark.parametrize("operation", ["validate", "write", "fsync"])
+def test_snapshot_filesystem_rejects_windows_before_modifying_artifact(
+    tmp_path, monkeypatch, operation
+):
+    monkeypatch.setattr(snapshot_manifest.sys, "platform", "win32")
+    with pytest.raises(NotImplementedError, match="require POSIX"):
+        if operation == "validate":
+            validate_artifact_root(tmp_path, creating=True)
+        elif operation == "write":
+            snapshot_manifest._write_json_atomic(tmp_path / "manifest.json", {})
+        else:
+            snapshot_manifest._fsync_directory(tmp_path)
+    assert not list(tmp_path.iterdir())
+
+
 def _fake_snapshot_tools() -> Any:
     tools = create_autospec(LocalSnapshotTools, instance=True)
     tools.launch_child.return_value = 100
@@ -558,6 +582,10 @@ def test_snapshot_timeout_must_be_positive_and_finite(
 def test_snapshot_create_abort_reaps_after_process_group_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    require_linux_snapshot()
+    sigkill = getattr(signal, "SIGKILL", None)
+    if sigkill is None:
+        raise NotImplementedError("Snapshot process group tests require SIGKILL")
     tools = LocalSnapshotTools()
     process = subprocess.Popen(
         [sys.executable, "-c", "raise SystemExit(1)"],
@@ -585,7 +613,7 @@ def test_snapshot_create_abort_reaps_after_process_group_cleanup(
         if process.pid in tools._children:
             tools.abort_create(process.pid)
 
-    assert killed == [(process.pid, signal.SIGKILL)]
+    assert killed == [(process.pid, sigkill)]
     assert process.pid not in tools._children
 
 
@@ -623,6 +651,7 @@ def test_snapshot_wait_ready_rejects_a_malformed_marker(
 def test_snapshot_create_abort_rejects_surviving_process_group(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    require_linux_snapshot()
     tools = LocalSnapshotTools()
     process = create_autospec(subprocess.Popen, instance=True)
     process.wait.side_effect = subprocess.TimeoutExpired("snapshot child", 10)

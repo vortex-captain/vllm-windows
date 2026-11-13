@@ -52,6 +52,12 @@ snapshot runtime. CUDA 12.x and Arm64 images omit it. A compatible host
 driver, kernel, and privileges are still required. Source installs must set
 `CRIU_CUDA_PLUGIN_DIR` to the directory containing `cuda_plugin.so`.
 
+Windows does not support snapshot execution or the protected artifact filesystem
+operations used by create, inspect, and restore. These operations fail explicitly
+before modifying an artifact; POSIX ownership checks and directory fsync are not
+replaced with Windows administrator checks or bypassed. CLI argument parsing,
+manifest schema validation, and identity comparison remain platform-independent.
+
 Run snapshot commands with `docker exec` inside a long-lived container. Restore
 hands the API server off as a detached process, so a one-shot container would
 stop that server when its PID 1 exits. Snapshot preflight requires every

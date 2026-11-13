@@ -2,13 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU-only unit tests for ExampleHiddenStatesConnector KV-cache-group logic."""
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
+from safetensors.torch import save_file
 
+from vllm.distributed.kv_transfer.kv_connector.v1 import (
+    example_hidden_states_connector as connector_module,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.example_hidden_states_connector import (  # noqa: E501
+    LOCK_SH,
     ExampleHiddenStatesConnector,
+    _acquire_write_lock,
+    load_hidden_states,
+    lock_file,
 )
 from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 from vllm.v1.kv_cache_interface import (
@@ -179,7 +190,7 @@ def _bare_connector() -> ExampleHiddenStatesConnector:
     conn = ExampleHiddenStatesConnector.__new__(ExampleHiddenStatesConnector)
     conn._request_filenames = {}
     conn._pending_saves = {}
-    conn._lock_fds = {}
+    conn._lock_files = {}
     conn._cache_kv_group_id = 1
     conn._connector_metadata = None
     conn._req_copy_events = {}
@@ -228,3 +239,71 @@ def test_get_finished_reports_tracked_completed_request():
     done_sending, done_recving = conn.get_finished({"cmpl-done"})
     assert done_sending == {"cmpl-done"}
     assert done_recving is None
+
+
+@pytest.mark.cpu_test
+def test_hidden_state_reader_waits_for_async_writer(tmp_path, monkeypatch):
+    """The client sees complete tensors, even when it arrives before the write."""
+    path = str(tmp_path / "states.safetensors")
+    tensors = {"hidden_states": torch.ones(2, 3), "token_ids": torch.tensor([1, 2])}
+    writer_ready = Event()
+    reader_started = Event()
+    release_writer = Event()
+
+    def observe_lock(file, flags):
+        if flags == LOCK_SH:
+            reader_started.set()
+        lock_file(file, flags)
+
+    monkeypatch.setattr(connector_module, "lock_file", observe_lock)
+
+    def write():
+        with _acquire_write_lock(path):
+            writer_ready.set()
+            assert release_writer.wait(10)
+            save_file(tensors, path)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        writer = executor.submit(write)
+        assert writer_ready.wait(10)
+        reader = executor.submit(load_hidden_states, path)
+        try:
+            assert reader_started.wait(10)
+            assert not reader.done()
+        finally:
+            release_writer.set()
+        writer.result(timeout=10)
+        actual = reader.result(timeout=10)
+    assert actual.keys() == tensors.keys()
+    for key in tensors:
+        assert torch.equal(actual[key], tensors[key])
+
+
+@pytest.mark.cpu_test
+def test_hidden_state_readers_share_the_lock(tmp_path):
+    path = str(tmp_path / "states.safetensors")
+    tensors = {"hidden_states": torch.ones(1, 2)}
+    save_file(tensors, path)
+    with _acquire_write_lock(path):
+        pass
+    with (
+        ThreadPoolExecutor(max_workers=1) as executor,
+        open(path + ".lock") as reader_lock,
+    ):
+        lock_file(reader_lock, LOCK_SH)
+        result = executor.submit(load_hidden_states, path)
+        actual = result.result(timeout=10)
+    assert torch.equal(actual["hidden_states"], tensors["hidden_states"])
+
+
+@pytest.mark.cpu_test
+def test_hidden_state_write_failure_releases_lock(tmp_path):
+    path = str(tmp_path / "states.safetensors")
+    lock = _acquire_write_lock(path)
+    event = Mock(spec=torch.cuda.Event)
+    event.synchronize.side_effect = RuntimeError("copy failed")
+    with pytest.raises(RuntimeError, match="copy failed"):
+        ExampleHiddenStatesConnector._write_tensors({}, event, path, lock)
+    assert lock.closed
+    with _acquire_write_lock(path) as replacement:
+        assert not replacement.closed

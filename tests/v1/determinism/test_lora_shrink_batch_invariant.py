@@ -4,10 +4,10 @@
 
 import pytest
 import torch
-from utils import skip_if_not_cuda_alike
 
 import vllm.lora.ops.triton_ops.lora_shrink_op as shrink_op
 import vllm.lora.ops.triton_ops.utils as lora_utils
+from tests.v1.determinism.utils import skip_if_not_cuda_alike
 from vllm.lora.ops.triton_ops import LoRAKernelMeta, lora_shrink
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT
 from vllm.utils.torch_utils import set_random_seed

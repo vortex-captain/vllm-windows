@@ -39,6 +39,7 @@ from vllm.snapshot.manifest import (
     _fsync_directory,
     _validation_path,
     _write_json_atomic,
+    require_linux_snapshot,
     validate_artifact_root,
     write_manifest_atomic,
 )
@@ -200,6 +201,7 @@ class LocalSnapshotTools:
         self._restored_processes: dict[int, tuple[tuple[int, int], ...]] = {}
 
     def _privileged(self) -> list[str]:
+        require_linux_snapshot()
         return [] if os.geteuid() == 0 else ["sudo", "-n"]
 
     def _run(
@@ -219,6 +221,7 @@ class LocalSnapshotTools:
     def preflight(self, action: str, artifact: Path) -> None:
         if platform.system() != "Linux" or platform.machine() != "x86_64":
             raise RuntimeError("snapshot requires Linux x86_64")
+        require_linux_snapshot()
         if action == "restore" and (
             not callable(getattr(os, "pidfd_open", None))
             or not callable(getattr(signal, "pidfd_send_signal", None))
@@ -243,6 +246,7 @@ class LocalSnapshotTools:
         workdir: Path,
         engine_argv: tuple[str, ...],
     ) -> int:
+        require_linux_snapshot()
         command = [
             sys.executable,
             "-m",
@@ -272,6 +276,7 @@ class LocalSnapshotTools:
         return process.pid
 
     def wait_ready(self, workdir: Path, root_pid: int) -> Oracle:
+        require_linux_snapshot()
         ready_file = workdir / "ready.json"
         deadline = time.monotonic() + self.timeout_s
         waitid = os.waitid  # type: ignore[attr-defined]
@@ -581,6 +586,7 @@ class LocalSnapshotTools:
         }
 
     def _capture_link_remaps(self, artifact: Path, names: set[str]) -> None:
+        require_linux_snapshot()
         if not names:
             return
         destination_dir = artifact / "link-remaps"
@@ -620,6 +626,7 @@ class LocalSnapshotTools:
                 target.unlink()
 
     def _restore_link_remaps(self, artifact: Path) -> dict[str, tuple[int, int]]:
+        require_linux_snapshot()
         source_dir = artifact / "link-remaps"
         if not source_dir.exists():
             return {}
@@ -957,11 +964,13 @@ class LocalSnapshotTools:
         return pidfd_open(pid)
 
     def _pidfd_exited(self, pidfd: int) -> bool:
+        require_linux_snapshot()
         poller = select.poll()
         poller.register(pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
         return any(self._pidfd_event_is_exit(event) for _fd, event in poller.poll(0))
 
     def _pidfd_event_is_exit(self, event: int) -> bool:
+        require_linux_snapshot()
         if event & (select.POLLERR | select.POLLNVAL):
             raise SnapshotRestoreError("restored process pidfd poll failed")
         return bool(event & (select.POLLIN | select.POLLHUP))
@@ -1260,6 +1269,7 @@ class LocalSnapshotTools:
             ) from error
 
     def cleanup(self, root_pid: int) -> None:
+        require_linux_snapshot()
         handles = self._restored_processes.get(root_pid)
         if handles is None:
             raise SnapshotRestoreError("no pinned restore transaction for cleanup")
@@ -1304,6 +1314,7 @@ class LocalSnapshotTools:
         _close_pidfds(handles)
 
     def abort_create(self, root_pid: int) -> None:
+        require_linux_snapshot()
         process = self._children.get(root_pid)
         if process is None:
             return

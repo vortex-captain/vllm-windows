@@ -3,6 +3,10 @@
 """Integration tests for shutdown behavior, timeout, and signal handling."""
 
 import asyncio
+import contextlib
+import multiprocessing
+import os
+import runpy
 import signal
 import subprocess
 import sys
@@ -18,6 +22,7 @@ from prometheus_client.parser import text_string_to_metric_families
 
 from tests.utils import RemoteOpenAIServer
 from vllm.utils.network_utils import get_open_port
+from vllm.utils.subprocess_utils import WindowsJob, start_process_in_group
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
@@ -162,88 +167,100 @@ async def _wait_for_running_request(
     raise AssertionError(f"No request reached the running state within {timeout}s")
 
 
+def _run_failure_test_server(port: int, server_log: Path) -> None:
+    with server_log.open("wb") as log_file:
+        os.dup2(log_file.fileno(), sys.stdout.fileno())
+        os.dup2(log_file.fileno(), sys.stderr.fileno())
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        module = "vllm.entrypoints.launchers.api_server.entry"
+        sys.argv = [
+            module,
+            "--model",
+            MODEL_NAME,
+            "--dtype",
+            "bfloat16",
+            "--max-model-len",
+            "128",
+            "--enforce-eager",
+            "--port",
+            str(port),
+            "--gpu-memory-utilization",
+            "0.05",
+            "--max-num-seqs",
+            "2",
+        ]
+        runpy.run_module(module, run_name="__main__")
+
+
 @pytest.mark.asyncio
 async def test_shutdown_on_engine_failure(tmp_path: Path):
-    """Verify that API returns connection error when server process is killed.
-
-    Starts a vLLM server, kills it to simulate a crash, then verifies that
-    subsequent API calls fail appropriately.
-    """
+    """Killing the server must make subsequent API calls fail."""
     port = get_open_port()
-
-    # Redirect server output to a file rather than a pipe: nothing drains the
-    # pipes while we poll for startup, so a server that writes more than the
-    # pipe buffer holds would block on write and never become ready.
     server_log = tmp_path / "server.log"
-    with server_log.open("wb") as log_file:
-        proc = subprocess.Popen(
-            [
-                # dtype, max-len etc set so that this can run in CI
-                sys.executable,
-                "-m",
-                "vllm.entrypoints.launchers.api_server.entry",
-                "--model",
-                MODEL_NAME,
-                "--dtype",
-                "bfloat16",
-                "--max-model-len",
-                "128",
-                "--enforce-eager",
-                "--port",
-                str(port),
-                "--gpu-memory-utilization",
-                "0.05",
-                "--max-num-seqs",
-                "2",
-            ],
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN),
-        )
-
-    # Wait for server startup
-    start_time = time.time()
-    client = openai.AsyncOpenAI(
+    server_log.touch()
+    job = WindowsJob() if sys.platform == "win32" else None
+    proc = None
+    children: list[psutil.Process] = []
+    async with openai.AsyncOpenAI(
         base_url=f"http://localhost:{port}/v1",
         api_key="dummy",
         max_retries=0,
         timeout=10,
-    )
-
-    # Poll until server is ready
-    while time.time() - start_time < _SERVER_STARTUP_TIMEOUT:
+    ) as client:
         try:
-            await client.completions.create(
-                model=MODEL_NAME, prompt="Hello", max_tokens=1
+            proc = start_process_in_group(
+                multiprocessing.get_context("spawn"),
+                _run_failure_test_server,
+                args=(port, server_log),
+                job=job,
             )
-            break
-        except Exception:
-            time.sleep(0.5)
-            if proc.poll() is not None:
+            deadline = time.monotonic() + _SERVER_STARTUP_TIMEOUT
+            while time.monotonic() < deadline:
+                try:
+                    await client.completions.create(
+                        model=MODEL_NAME, prompt="Hello", max_tokens=1
+                    )
+                    break
+                except (openai.APIConnectionError, openai.APIStatusError):
+                    if not proc.is_alive():
+                        log = server_log.read_text(encoding="utf-8", errors="replace")
+                        pytest.fail(
+                            f"Server died during startup: {proc.exitcode}\n{log}"
+                        )
+                    await asyncio.sleep(0.5)
+            else:
                 pytest.fail(
-                    f"Server died during startup: {proc.returncode}\n"
-                    f"{server_log.read_text(errors='replace')}"
+                    f"Server failed to start in {_SERVER_STARTUP_TIMEOUT} seconds\n"
+                    f"{server_log.read_text(encoding='utf-8', errors='replace')}"
                 )
-    else:
-        proc.terminate()
-        proc.wait(timeout=_PROCESS_EXIT_TIMEOUT)
-        pytest.fail(
-            f"Server failed to start in {_SERVER_STARTUP_TIMEOUT} seconds\n"
-            f"{server_log.read_text(errors='replace')}"
-        )
 
-    # Kill server to simulate crash
-    proc.terminate()
-    time.sleep(1)
-
-    # Verify API calls now fail
-    with pytest.raises((openai.APIConnectionError, openai.APIStatusError)):
-        await client.completions.create(
-            model=MODEL_NAME, prompt="This should fail", max_tokens=1
-        )
-
-    return_code = proc.wait(timeout=_PROCESS_EXIT_TIMEOUT)
-    assert return_code is not None
+            if job is None:
+                children = psutil.Process(proc.pid).children(recursive=True)
+            proc.terminate()
+            await asyncio.to_thread(proc.join, _PROCESS_EXIT_TIMEOUT)
+            assert not proc.is_alive()
+            with pytest.raises((openai.APIConnectionError, openai.APIStatusError)):
+                await client.completions.create(
+                    model=MODEL_NAME, prompt="This should fail", max_tokens=1
+                )
+        finally:
+            if job is not None:
+                job.close()
+            elif proc is not None:
+                if proc.is_alive():
+                    with contextlib.suppress(psutil.NoSuchProcess):
+                        children.extend(
+                            psutil.Process(proc.pid).children(recursive=True)
+                        )
+                    proc.kill()
+                for child in children:
+                    with contextlib.suppress(psutil.NoSuchProcess):
+                        child.kill()
+                _, alive = psutil.wait_procs(children, timeout=_PROCESS_EXIT_TIMEOUT)
+                assert not alive
+            if proc is not None:
+                proc.join(_PROCESS_EXIT_TIMEOUT)
+                assert not proc.is_alive()
 
 
 @pytest.mark.asyncio

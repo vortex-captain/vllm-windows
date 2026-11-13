@@ -1,4 +1,4 @@
 winloop
 triton-windows==3.8.0
 xformers==0.0.35; platform_machine != "ARM64" and platform_machine != "arm64"
-portalocker
+portalocker[win32]>=4.4.2

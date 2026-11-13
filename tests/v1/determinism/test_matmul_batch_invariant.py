@@ -8,9 +8,9 @@ item doesn't change based on other items in the batch).
 
 import pytest
 import torch
-from utils import skip_unsupported
 
 import vllm.model_executor.determinism.batch_invariant as bi
+from tests.v1.determinism.utils import skip_unsupported
 from vllm.model_executor.determinism.batch_invariant import (
     enable_batch_invariant_mode,
     matmul_batch_invariant,

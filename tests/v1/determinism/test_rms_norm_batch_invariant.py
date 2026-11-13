@@ -4,8 +4,8 @@
 
 import pytest
 import torch
-from utils import skip_if_not_cuda_alike, skip_unsupported
 
+from tests.v1.determinism.utils import skip_if_not_cuda_alike, skip_unsupported
 from vllm.model_executor.determinism.batch_invariant import (
     rms_norm_batch_invariant,
 )

@@ -183,7 +183,6 @@ def test_build_multi_port_external_lb_child_args_sets_external_rank_server():
 def test_run_vllm_dp_server_uses_python_server_by_default(monkeypatch):
     calls: list[str] = []
 
-    monkeypatch.setattr(dp_sup.os, "setpgrp", lambda: None)
     monkeypatch.setattr(dp_sup, "set_process_title", lambda *_args: None)
     monkeypatch.setattr(dp_sup, "decorate_logs", lambda *_args: None)
     monkeypatch.setattr(dp_sup.envs, "VLLM_RUST_FRONTEND_PATH", None, raising=False)
@@ -202,7 +201,6 @@ def test_run_vllm_dp_server_uses_python_server_by_default(monkeypatch):
 def test_run_vllm_dp_server_uses_rust_frontend_when_enabled(monkeypatch):
     calls: list[str] = []
 
-    monkeypatch.setattr(dp_sup.os, "setpgrp", lambda: None)
     monkeypatch.setattr(dp_sup, "set_process_title", lambda *_args: None)
     monkeypatch.setattr(dp_sup, "decorate_logs", lambda *_args: None)
     monkeypatch.setattr(dp_sup.envs, "VLLM_USE_RUST_FRONTEND", True, raising=False)
@@ -504,7 +502,7 @@ class MockVLLMServer:
         @app.get("/kill")
         async def kill() -> Response:
             print(f"MockServer {self.port}: /kill")
-            os.kill(os.getpid(), signal.SIGKILL)
+            os._exit(1)
 
         config = uvicorn.Config(
             app,
@@ -735,7 +733,7 @@ async def test_basic_lifecycle(monkeypatch):
         assert supervisor.is_ready
         print("/health is 200 --- expected!")
 
-        os.kill(os.getpid(), signal.SIGTERM)
+        signal.raise_signal(signal.SIGTERM)
 
         await asyncio.wait_for(_task, timeout=5.0)
         for p in supervisor._processes:
@@ -866,7 +864,7 @@ async def test_dp_server_fails(monkeypatch):
         print("/health is 200 --- expected!")
 
         dp_mock_server_process = supervisor._processes[0]
-        os.kill(dp_mock_server_process.pid, signal.SIGKILL)
+        dp_mock_server_process.kill()
         await asyncio.sleep(1.0)
         assert not dp_mock_server_process.is_alive()
 
@@ -902,7 +900,7 @@ async def test_shutdown_timeout(monkeypatch: pytest.MonkeyPatch):
         assert supervisor.is_ready
 
         start_t = time.perf_counter()
-        os.kill(os.getpid(), signal.SIGTERM)
+        signal.raise_signal(signal.SIGTERM)
 
         print(f"DRAINING FOR {_DRAIN_SECONDS}")
         await asyncio.wait_for(_task, timeout=_DRAIN_SECONDS + CHILD_EXIT_GRACE_S + 5.0)

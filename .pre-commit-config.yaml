@@ -267,7 +267,7 @@ repos:
     additional_dependencies: [regex]
   - id: validate-config
     name: Validate configuration has default values and that each field has a docstring
-    entry: python tools/pre_commit/validate_config.py
+    entry: python -X utf8 tools/pre_commit/validate_config.py
     language: python
     additional_dependencies: [regex]
   - id: validate-docker-versions

@@ -4,15 +4,15 @@ from typing import cast
 
 import pytest
 import torch
-from nvfp4_utils import (
+from safetensors import safe_open
+
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from tests.kernels.quantization.nvfp4_utils import (
     FLOAT4_E2M1_MAX,
     FLOAT8_E4M3_MAX,
     break_fp4_bytes,
     kE2M1ToFloat,
 )
-from safetensors import safe_open
-
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.kernel import KernelConfig
 from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel

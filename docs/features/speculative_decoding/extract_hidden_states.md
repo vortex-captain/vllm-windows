@@ -122,5 +122,11 @@ Each request produces a `.safetensors` file containing:
 
 The file path is returned in `output.kv_transfer_params["hidden_states_path"]`. Use `load_hidden_states()` from the connector module to read the file with proper synchronization.
 
+On Windows, the connector uses blocking Win32 shared/exclusive file locks through
+`portalocker[win32]>=4.4.2`. The writer retains its lock until the asynchronous
+write finishes; multiple readers can share the lock afterward. Use a Windows
+directory accessible to both the server and client for `shared_storage_path`
+instead of the Linux `/dev/shm` path.
+
 !!! note
     Chunked prefill is not compatible with this feature and must be disabled.

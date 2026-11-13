@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import fcntl
 import os
+import sys
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import partial
 from importlib.metadata import version
-from typing import TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Any
 
 import torch
 from packaging.version import Version
@@ -24,6 +24,15 @@ from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+
+if sys.platform == "win32":
+    from portalocker import LOCK_EX, LOCK_SH
+    from portalocker.portalocker import Win32Locker
+
+    lock_file = Win32Locker().lock
+else:
+    from fcntl import LOCK_EX, LOCK_SH
+    from fcntl import flock as lock_file
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -49,7 +58,7 @@ def load_hidden_states(path: str) -> dict[str, torch.Tensor]:
     """Load hidden states written by ExampleHiddenStatesConnector.
 
     Blocks (without polling) until the async write is complete by
-    acquiring a shared flock on the companion lock file.  The kernel
+    acquiring a shared lock on the companion lock file. The kernel
     puts the caller to sleep until the writer releases its exclusive lock.
 
     Args:
@@ -61,9 +70,23 @@ def load_hidden_states(path: str) -> dict[str, torch.Tensor]:
     """
     lock_path = path + ".lock"
     with open(lock_path) as lf:
-        fcntl.flock(lf, fcntl.LOCK_SH)  # sleeps until writer releases LOCK_EX
+        lock_file(lf, LOCK_SH)
         data = load_file(path, device="cpu")
     return data
+
+
+def _acquire_write_lock(path: str) -> IO[bytes]:
+    lock = open(  # noqa: SIM115 - owned by the async writer
+        path + ".lock",
+        "wb",
+        opener=lambda name, flags: os.open(name, flags, 0o644),
+    )
+    try:
+        lock_file(lock, LOCK_EX)
+    except BaseException:
+        lock.close()
+        raise
+    return lock
 
 
 def cleanup_hidden_states(path: str, keep_hidden_states: bool = False) -> None:
@@ -234,11 +257,11 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         self.use_lock = self._kv_transfer_config.get_from_extra_config(
             "use_synchronization_lock", True
         )
-        # req_id → open fd on the .lock file with LOCK_EX held.
+        # req_id → open file with LOCK_EX held.
         # Pre-created in wait_for_save when a request first arrives,
-        # consumed by _submit_async_write which passes the fd to the
+        # consumed by _submit_async_write which passes the file to the
         # thread pool worker for release after writing.
-        self._lock_fds: dict[str, int] = {}
+        self._lock_files: dict[str, IO[bytes]] = {}
         # req_id → in-flight disk-write Future for that req_id.
         self._req_futures: dict[str, Future] = {}
         # req_id → CUDA event marking completion of the DtoH copy. Once
@@ -280,13 +303,11 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         if not isinstance(metadata, ExampleHiddenStatesConnectorMetadata):
             return
         for req_id, filename in metadata.new_req_filenames.items():
-            if req_id in self._lock_fds:
+            if req_id in self._lock_files:
                 continue
             lock_path = filename + ".lock"
             os.makedirs(os.path.dirname(lock_path), exist_ok=True)
-            lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            self._lock_fds[req_id] = lock_fd
+            self._lock_files[req_id] = _acquire_write_lock(filename)
 
     def _on_write_done(self, req_id: str, future: Future) -> None:
         """Surface any exception from the disk-write thread and drop the
@@ -330,11 +351,11 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         tensors: dict[str, torch.Tensor],
         event: torch.cuda.Event,
         filename: str,
-        lock_fd: int | None,
+        lock: IO[bytes] | None,
     ) -> None:
         """Thread worker: wait for async DtoH copy, write to disk, release lock.
 
-        ``lock_fd`` is an open file descriptor on the companion ``.lock``
+        ``lock`` is an open file on the companion ``.lock``
         file with ``LOCK_EX`` already held.  Closing it releases the lock,
         which unblocks any client sleeping on ``LOCK_SH``.
         """
@@ -342,8 +363,8 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             event.synchronize()
             save_file(tensors, filename)
         finally:
-            if lock_fd is not None:
-                os.close(lock_fd)  # releases LOCK_EX
+            if lock is not None:
+                lock.close()
 
     def save_kv_layer(
         self,
@@ -423,18 +444,21 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         os.makedirs(os.path.dirname(pending.filename), exist_ok=True)
 
-        # Use the pre-created lock fd from wait_for_save (already holds
+        # Use the pre-created lock file from wait_for_save (already holds
         # LOCK_EX). Falls back to creating one here if use_lock is True
-        # but no pre-created fd exists (shouldn't happen in normal flow).
-        lock_fd = self._lock_fds.pop(pending.req_id, None)
-        if lock_fd is None and self.use_lock:
-            lock_path = pending.filename + ".lock"
-            lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        # but no pre-created file exists (shouldn't happen in normal flow).
+        lock = self._lock_files.pop(pending.req_id, None)
+        if lock is None and self.use_lock:
+            lock = _acquire_write_lock(pending.filename)
 
-        future = self._executor.submit(
-            self._write_tensors, tensors, copy_done, pending.filename, lock_fd
-        )
+        try:
+            future = self._executor.submit(
+                self._write_tensors, tensors, copy_done, pending.filename, lock
+            )
+        except BaseException:
+            if lock is not None:
+                lock.close()
+            raise
         self._req_copy_events[pending.req_id] = copy_done
         self._req_futures[pending.req_id] = future
         future.add_done_callback(partial(self._on_write_done, pending.req_id))
@@ -591,11 +615,11 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             # Only report requests we actually tracked for sending.
             if event is not None:
                 done_sending.add(req_id)
-            # Clean up any leftover lock fds (e.g. aborted requests that never
+            # Clean up any leftover lock files (e.g. aborted requests that never
             # went through _submit_async_write).
-            lock_fd = self._lock_fds.pop(req_id, None)
-            if lock_fd is not None:
-                os.close(lock_fd)
+            lock = self._lock_files.pop(req_id, None)
+            if lock is not None:
+                lock.close()
 
         return done_sending or None, None
 
