@@ -24,6 +24,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.platforms import current_platform
+from vllm.ray.lazy_utils import is_ray_initialized
 from vllm.transformers_utils.repo_utils import hf_api
 
 
@@ -40,7 +41,7 @@ def should_do_global_cleanup_after_test(request) -> bool:
 def cleanup_fixture(should_do_global_cleanup_after_test: bool):
     yield
     if should_do_global_cleanup_after_test:
-        cleanup_dist_env_and_memory(shutdown_ray=True)
+        cleanup_dist_env_and_memory(shutdown_ray=is_ray_initialized())
 
 
 @pytest.fixture
@@ -73,7 +74,7 @@ def dist_init():
         )
         initialize_model_parallel(1, 1)
         yield
-    cleanup_dist_env_and_memory(shutdown_ray=True)
+    cleanup_dist_env_and_memory(shutdown_ray=is_ray_initialized())
 
 
 class DummyLoRAModel(nn.Sequential, SupportsLoRA):
