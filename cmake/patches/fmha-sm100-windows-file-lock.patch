@@ -1,0 +1,46 @@
+diff --git a/python/fmha_sm100/_jit_cache.py b/python/fmha_sm100/_jit_cache.py
+--- a/python/fmha_sm100/_jit_cache.py
++++ b/python/fmha_sm100/_jit_cache.py
+@@ -30,7 +30,6 @@
+ from __future__ import annotations
+ 
+ import contextlib
+-import fcntl
+ import hashlib
+ import json
+ import logging
+@@ -44,6 +43,11 @@
+ from pathlib import Path
+ from typing import Callable
+ 
++if os.name == "nt":
++    from vllm.utils import _windows_fcntl as fcntl
++else:
++    import fcntl
++
+ logger = logging.getLogger(__name__)
+ 
+ SCHEMA = 2
+diff --git a/python/fmha_sm100/decode_q8kv4/_build_utils.py b/python/fmha_sm100/decode_q8kv4/_build_utils.py
+--- a/python/fmha_sm100/decode_q8kv4/_build_utils.py
++++ b/python/fmha_sm100/decode_q8kv4/_build_utils.py
+@@ -5,7 +5,6 @@
+ 
+ from __future__ import annotations
+ 
+-import fcntl
+ import hashlib
+ import logging
+ import os
+@@ -16,6 +15,11 @@
+ from functools import lru_cache
+ from pathlib import Path
+ 
++if os.name == "nt":
++    from vllm.utils import _windows_fcntl as fcntl
++else:
++    import fcntl
++
+ logger = logging.getLogger(__name__)
+ 
+ _PACKAGE_ROOT = Path(__file__).resolve().parents[1]  # python/fmha_sm100

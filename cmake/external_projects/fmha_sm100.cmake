@@ -30,6 +30,13 @@ if(NOT fmha_sm100_POPULATED)
 endif()
 message(STATUS "fmha_sm100 is available at ${fmha_sm100_SOURCE_DIR}")
 
+if(WIN32)
+  vllm_apply_patch(
+    "FMHA SM100 Windows file locks"
+    "${fmha_sm100_SOURCE_DIR}"
+    "${CMAKE_CURRENT_LIST_DIR}/../patches/fmha-sm100-windows-file-lock.patch")
+endif()
+
 add_custom_target(fmha_sm100)
 
 set(FMHA_SM100_PY_ROOT "${fmha_sm100_SOURCE_DIR}/python/fmha_sm100")

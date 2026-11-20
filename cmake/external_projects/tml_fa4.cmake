@@ -26,6 +26,13 @@ if(NOT tml_fa4_POPULATED)
 endif()
 message(STATUS "tml-fa4 is available at ${tml_fa4_SOURCE_DIR}")
 
+if(WIN32)
+  vllm_apply_patch(
+    "TML FA4 Windows file locks"
+    "${tml_fa4_SOURCE_DIR}"
+    "${CMAKE_CURRENT_LIST_DIR}/../patches/vllm-flash-attn-windows-file-lock.patch")
+endif()
+
 add_custom_target(tml_fa4)
 
 # Install into a private namespace so this implementation cannot shadow the
