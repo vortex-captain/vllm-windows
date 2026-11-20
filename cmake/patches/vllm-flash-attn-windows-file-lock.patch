@@ -19,3 +19,29 @@ diff --git a/flash_attn/cute/cache_utils.py b/flash_attn/cute/cache_utils.py
 +
  import cutlass
  import cutlass.cute as cute
+@@ -25,7 +29,10 @@
+ # "undefined symbol" errors when loading cached kernels from disk.
+ for _lib_path in cute.runtime.find_runtime_libraries(enable_tvm_ffi=False):
+     if Path(_lib_path).exists():
+-        ctypes.CDLL(_lib_path, mode=ctypes.RTLD_GLOBAL)
++        if os.name == "nt":
++            ctypes.CDLL(_lib_path, mode=getattr(ctypes, "RTLD_GLOBAL", 0))
++        else:
++            ctypes.CDLL(_lib_path, mode=ctypes.RTLD_GLOBAL)
+ 
+ CompileKeyType: TypeAlias = tuple[Hashable, ...]
+ CallableFunction: TypeAlias = JitCompiledFunction | tvm_ffi.Function
+diff --git a/flash_attn/cute/flash_bwd.py b/flash_attn/cute/flash_bwd.py
+--- a/flash_attn/cute/flash_bwd.py
++++ b/flash_attn/cute/flash_bwd.py
+@@ -1179,7 +1179,9 @@
+             if cutlass.const_expr(not seqlen.has_cu_seqlens_k):
+                 mdK_cur, mdV_cur = [t[batch_idx, head_idx_kv, None] for t in (mdK, mdV)]
+             else:
+-                padded_offset_k = seqlen.offset_k + batch_idx * self.n_block_size
++                # Match the tile-aligned scratch offset read by the postprocess.
++                # Ragged cu_seqlens offsets need rounding before flattening tiles.
++                padded_offset_k = seqlen.padded_offset_k
+                 mdK_cur = cute.domain_offset((padded_offset_k * self.head_dim_padded,), mdK[head_idx_kv, None])
+                 mdV_cur = cute.domain_offset((padded_offset_k * self.head_dim_v_padded,), mdV[head_idx_kv, None])
+ 

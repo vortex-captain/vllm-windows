@@ -30,7 +30,8 @@ if(WIN32)
   vllm_apply_patch(
     "TML FA4 Windows file locks"
     "${tml_fa4_SOURCE_DIR}"
-    "${CMAKE_CURRENT_LIST_DIR}/../patches/vllm-flash-attn-windows-file-lock.patch")
+    "${CMAKE_CURRENT_LIST_DIR}/../patches/vllm-flash-attn-windows-file-lock.patch"
+    INCLUDE "flash_attn/cute/cache_utils.py")
 endif()
 
 add_custom_target(tml_fa4)
