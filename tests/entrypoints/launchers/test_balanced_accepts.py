@@ -84,20 +84,20 @@ async def _serve(sock, requests, loads=None, **config_kwargs):
         assert loads[0] == 2**31 - 1
 
 
-@pytest.mark.parametrize(
-    "loop_factory",
-    [
-        # Balanced accepts uses add_reader, which Windows' Proactor loop lacks.
-        pytest.param(asyncio.SelectorEventLoop, id="asyncio"),
-        pytest.param(uvloop_impl.new_event_loop, id=uvloop_impl.__name__),
-    ],
-)
-def test_requests_and_keep_alive_served(loop_factory):
+def _run(coro, loop_impl):
+    if loop_impl == "uvloop":
+        return uvloop_impl.run(coro)
+    # Balanced accepts uses add_reader, which Windows' Proactor loop lacks.
+    with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+        return runner.run(coro)
+
+
+@pytest.mark.parametrize("loop_impl", ["asyncio", "uvloop"])
+def test_requests_and_keep_alive_served(loop_impl):
     async def requests(port, server):
         return await _get(port), await _get(port, requests=3)
 
-    with asyncio.Runner(loop_factory=loop_factory) as runner:
-        one, three = runner.run(_serve(_bound_socket(), requests))
+    one, three = _run(_serve(_bound_socket(), requests), loop_impl)
     assert one == [str(os.getpid()).encode()]
     assert len(three) == 3
 
