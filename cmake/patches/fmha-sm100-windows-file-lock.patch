@@ -1,7 +1,8 @@
 diff --git a/python/fmha_sm100/_jit_cache.py b/python/fmha_sm100/_jit_cache.py
+index df1af67..856346a 100644
 --- a/python/fmha_sm100/_jit_cache.py
 +++ b/python/fmha_sm100/_jit_cache.py
-@@ -30,7 +30,6 @@
+@@ -30,7 +30,6 @@ mismatched entries are misses, never errors.
  from __future__ import annotations
  
  import contextlib
@@ -9,7 +10,7 @@ diff --git a/python/fmha_sm100/_jit_cache.py b/python/fmha_sm100/_jit_cache.py
  import hashlib
  import json
  import logging
-@@ -44,6 +43,11 @@
+@@ -44,6 +43,11 @@ from functools import cached_property
  from pathlib import Path
  from typing import Callable
  
@@ -21,7 +22,183 @@ diff --git a/python/fmha_sm100/_jit_cache.py b/python/fmha_sm100/_jit_cache.py
  logger = logging.getLogger(__name__)
  
  SCHEMA = 2
+diff --git a/python/fmha_sm100/csrc/include/plan.cuh b/python/fmha_sm100/csrc/include/plan.cuh
+index cf84957..68e08e0 100644
+--- a/python/fmha_sm100/csrc/include/plan.cuh
++++ b/python/fmha_sm100/csrc/include/plan.cuh
+@@ -59,7 +59,7 @@ struct PlanSharedState {
+   int     unsplit_sub_counter[MAX_UNSPLIT];
+   int     num_unsplit;
+ 
+-  uint     warp_scratch[8];  // for block reduce
++  unsigned int warp_scratch[8];  // for block reduce
+   typename cub::BlockScan<int, MAX_SMS>::TempStorage scan_temp;
+ };
+ 
+@@ -68,10 +68,10 @@ struct PlanSharedState {
+ // cost in upper 24 bits, idx in lower 8 bits → min/max on int32 works
+ // ============================================================================
+ 
+-__device__ __forceinline__ uint pack_cost_idx(uint cost, uint idx) {
++__device__ __forceinline__ unsigned int pack_cost_idx(unsigned int cost, unsigned int idx) {
+   return (cost << 8) | (idx & 0xff);
+ }
+-__device__ __forceinline__ uint unpack_idx(uint packed) { return packed & 0xff; }
++__device__ __forceinline__ unsigned int unpack_idx(unsigned int packed) { return packed & 0xff; }
+ 
+ // Layout: [63:32] qo_tile_idx (32b) | [31:16] qo_head_idx (16b) | [15:0] batch_idx (16b)
+ // 64-bit so per-token sparse decode (batch_size = total_q, up to 65536) can address batch
+@@ -91,13 +91,13 @@ __device__ __forceinline__ uint64_t pack_work_range(int start, int end) {
+ template <bool IsMin>
+ __device__ __forceinline__ int block_reduce_cost(PlanSharedState& s, int n) {
+   int tid = static_cast<int>(threadIdx.x);
+-  uint val = (tid < n)
++  unsigned int val = (tid < n)
+       ? pack_cost_idx(s.sm_cost[tid], tid)
+       : pack_cost_idx(IsMin ? 0x7fffff : 0, tid);
+ 
+   #pragma unroll
+   for (int offset = 16; offset > 0; offset >>= 1) {
+-    uint other = __shfl_xor_sync(0xffffffff, val, offset);
++    unsigned int other = __shfl_xor_sync(0xffffffff, val, offset);
+     val = IsMin ? ::min(val, other) : ::max(val, other);
+   }
+ 
+@@ -109,7 +109,7 @@ __device__ __forceinline__ int block_reduce_cost(PlanSharedState& s, int n) {
+         : pack_cost_idx(IsMin ? 0x7fffff : 0, tid * 32);
+     #pragma unroll
+     for (int offset = 4; offset > 0; offset >>= 1) {
+-      uint other = __shfl_xor_sync(0xff, val, offset);
++      unsigned int other = __shfl_xor_sync(0xff, val, offset);
+       val = IsMin ? ::min(val, other) : ::max(val, other);
+     }
+     if (tid == 0) s.warp_scratch[0] = val;
+diff --git a/python/fmha_sm100/csrc/include/q8kv4_indexer/params.hpp b/python/fmha_sm100/csrc/include/q8kv4_indexer/params.hpp
+index 34080da..f07712e 100644
+--- a/python/fmha_sm100/csrc/include/q8kv4_indexer/params.hpp
++++ b/python/fmha_sm100/csrc/include/q8kv4_indexer/params.hpp
+@@ -12,7 +12,11 @@
+ 
+ namespace q8kv4_indexer {
+ 
++#if defined(_MSC_VER)
++struct alignas(64) IndexerGemmParams {
++#else
+ struct alignas(128) IndexerGemmParams {
++#endif
+   CUtensorMap packed_k{};
+   CUtensorMap k_scale{};
+   uint8_t const *q_ptr = nullptr;
+diff --git a/python/fmha_sm100/csrc/include/q8kv4_indexer_sm107/params.hpp b/python/fmha_sm100/csrc/include/q8kv4_indexer_sm107/params.hpp
+index 224fe50..4d6296d 100644
+--- a/python/fmha_sm100/csrc/include/q8kv4_indexer_sm107/params.hpp
++++ b/python/fmha_sm100/csrc/include/q8kv4_indexer_sm107/params.hpp
+@@ -12,7 +12,11 @@
+ 
+ namespace q8kv4_indexer_sm107 {
+ 
++#if defined(_MSC_VER)
++struct alignas(64) IndexerGemmParams {
++#else
+ struct alignas(128) IndexerGemmParams {
++#endif
+   CUtensorMap packed_k{};
+   CUtensorMap k_scale{};
+   uint8_t const *q_ptr = nullptr;
+diff --git a/python/fmha_sm100/csrc/include/sm100_fmha_fwd_mainloop_tma_warpspecialized.hpp b/python/fmha_sm100/csrc/include/sm100_fmha_fwd_mainloop_tma_warpspecialized.hpp
+index 59d6788..49090f0 100644
+--- a/python/fmha_sm100/csrc/include/sm100_fmha_fwd_mainloop_tma_warpspecialized.hpp
++++ b/python/fmha_sm100/csrc/include/sm100_fmha_fwd_mainloop_tma_warpspecialized.hpp
+@@ -1363,7 +1363,7 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
+                 + (kSingleWG ? q_offset_correction : 0);
+         int kv_sub = (stage % get<1>(ThreadShape{})) * get<1>(TileShapeQK{});
+         int sparse_linear_pos = tile_from_end * int(get<1>(TileShape{})) + kv_sub;
+-        uint page_idx = uint(sparse_linear_pos / KVPageSize);
++        unsigned int page_idx = static_cast<unsigned int>(sparse_linear_pos / KVPageSize);
+         int offset_in_page = sparse_linear_pos % KVPageSize;
+         sparse_tile_counter++;
+         if (page_idx >= params.load.kv_block_num) {
+@@ -1418,8 +1418,8 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
+                   + (kSingleWG ? q_offset_correction : 0)
+                   + local_row;
+ 
+-      uint qo_len = uint(get<0>(problem_shape));
+-      if (uint(abs_row) < qo_len) {
++      unsigned int qo_len = static_cast<unsigned int>(get<0>(problem_shape));
++      if (static_cast<unsigned int>(abs_row) < qo_len) {
+         int qo_head_idx = get<2, 0>(blk_coord);
+         int batch_idx = get<2, 1>(blk_coord);
+         int _seg_off_sz = get<3, 1>(params_problem_shape) + 1;
+@@ -1971,7 +1971,7 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
+       k_tile_idx = (effective_end - 1) * kTilesPerMacro;
+       int qo_head_idx = get<2, 0>(blk_coord);
+       int batch_idx = get<2, 1>(blk_coord);
+-      uint qo_len = uint(get<0>(problem_shape));
++      unsigned int qo_len = static_cast<unsigned int>(get<0>(problem_shape));
+       int segment_offset = get<0>(params_problem_shape).segment_offsets[batch_idx];
+       int row_s0 = get<0>(tTMEM_LOADVcS(_0{})) + get<0>(TileShape{}) * get<0>(blk_coord);
+       int row_s1 = row_s0 + kS1RowOffset;
+@@ -1983,9 +1983,9 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
+             make_gmem_ptr(epilogue.params.ptr_MaxScore),
+             epilogue.params.layout_MaxScore);
+         ms_stride_k = int(&gMaxScore(0, 0, 1) - &gMaxScore(0, 0, 0));
+-        if (!is_padding_corr && uint(row_s0) < qo_len)
++        if (!is_padding_corr && static_cast<unsigned int>(row_s0) < qo_len)
+           ms_base_s0 = &gMaxScore(segment_offset + row_s0, qo_head_idx, 0);
+-        if (!is_padding_corr && uint(row_s1) < qo_len)
++        if (!is_padding_corr && static_cast<unsigned int>(row_s1) < qo_len)
+           ms_base_s1 = &gMaxScore(segment_offset + row_s1, qo_head_idx, 0);
+       };
+ 
+@@ -2000,7 +2000,7 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
+           ms_stride_k = epilogue.params.max_score_stride_k;
+ 
+           auto compute_ms_base = [&](int row) -> float* {
+-            if (uint(row) >= qo_len) return nullptr;
++            if (static_cast<unsigned int>(row) >= qo_len) return nullptr;
+             int actual_tok = row / kPackFactor;
+             int pf_idx = row % kPackFactor;
+             int unpacked_head = kv_head * h_r_orig + rem_hr_idx * kPackFactor + pf_idx;
+diff --git a/python/fmha_sm100/csrc/include/sm100_fmha_reduction.hpp b/python/fmha_sm100/csrc/include/sm100_fmha_reduction.hpp
+index 0c30cdd..d955027 100644
+--- a/python/fmha_sm100/csrc/include/sm100_fmha_reduction.hpp
++++ b/python/fmha_sm100/csrc/include/sm100_fmha_reduction.hpp
+@@ -15,6 +15,8 @@
+  */
+ #pragma once
+ 
++#include <cfloat>
++
+ #include "cutlass/cutlass.h"
+ #include "fmha_common.hpp"
+ 
+@@ -63,6 +65,7 @@ struct Sm100FmhaReductionKernel {
+   static dim3 get_block_shape() { return dim3(MaxThreadsPerBlock, 1, 1); }
+ 
+   CUTLASS_DEVICE void operator()(Params const& params, char* /* smem */) {
++#if !defined(_MSC_VER) || defined(__CUDA_ARCH__)
+     const float scale_softmax_log2 = params.scale_softmax_log2 *
+         (params.k_global_scale ? *params.k_global_scale : 1.0f);
+     int head_idx = blockIdx.x;
+@@ -115,7 +118,7 @@ struct Sm100FmhaReductionKernel {
+     int stats_stride = warp_uniform(params.total_qo_len * params.num_qo_heads);
+     int stats_base = warp_uniform(abs_row * params.num_qo_heads + head_idx);
+ 
+-    float running_lse = -__FLT_MAX__;
++    float running_lse = -FLT_MAX;
+     float running_w = 0.f;
+     float running_o = 0.f;
+ 
+@@ -175,6 +178,7 @@ struct Sm100FmhaReductionKernel {
+ 
+     float inv_w = warp_uniform(1.f / running_w);
+     o_ptr_used[dst_off] = ElementOut(running_o * inv_w * params.inv_scale_o);
++#endif
+   }
+ };
+ 
 diff --git a/python/fmha_sm100/decode_q8kv4/_build_utils.py b/python/fmha_sm100/decode_q8kv4/_build_utils.py
+index 97c03c6..c443c18 100644
 --- a/python/fmha_sm100/decode_q8kv4/_build_utils.py
 +++ b/python/fmha_sm100/decode_q8kv4/_build_utils.py
 @@ -5,7 +5,6 @@
@@ -32,7 +209,7 @@ diff --git a/python/fmha_sm100/decode_q8kv4/_build_utils.py b/python/fmha_sm100/
  import hashlib
  import logging
  import os
-@@ -16,6 +15,11 @@
+@@ -16,6 +15,11 @@ from contextlib import contextmanager
  from functools import lru_cache
  from pathlib import Path
  
@@ -44,3 +221,168 @@ diff --git a/python/fmha_sm100/decode_q8kv4/_build_utils.py b/python/fmha_sm100/
  logger = logging.getLogger(__name__)
  
  _PACKAGE_ROOT = Path(__file__).resolve().parents[1]  # python/fmha_sm100
+@@ -92,7 +96,7 @@ def _unique_paths(candidates: list[Path]) -> tuple[Path, ...]:
+ 
+ 
+ def _nvcc_version(root: Path) -> tuple[int, int] | None:
+-    nvcc = root / "bin/nvcc"
++    nvcc = root / "bin" / ("nvcc.exe" if os.name == "nt" else "nvcc")
+     if not nvcc.is_file():
+         return None
+     try:
+diff --git a/python/fmha_sm100/decode_q8kv4/csrc/include/sm100/device/sm100_fmha_reduction.hpp b/python/fmha_sm100/decode_q8kv4/csrc/include/sm100/device/sm100_fmha_reduction.hpp
+index 57b05d4..f9cc03a 100644
+--- a/python/fmha_sm100/decode_q8kv4/csrc/include/sm100/device/sm100_fmha_reduction.hpp
++++ b/python/fmha_sm100/decode_q8kv4/csrc/include/sm100/device/sm100_fmha_reduction.hpp
+@@ -129,7 +129,7 @@ struct Sm100FmhaReductionKernel {
+     int stats_stride = warp_uniform(params.total_qo_len * params.num_qo_heads);
+     int stats_base = warp_uniform(abs_row * params.num_qo_heads + head_idx);
+ 
+-    float running_lse = -__FLT_MAX__;
++    float running_lse = -FLT_MAX;
+     float running_w = 0.f;
+     float running_o = 0.f;
+ 
+diff --git a/python/fmha_sm100/decode_q8kv4/interface.py b/python/fmha_sm100/decode_q8kv4/interface.py
+index 6f45281..05e6dda 100644
+--- a/python/fmha_sm100/decode_q8kv4/interface.py
++++ b/python/fmha_sm100/decode_q8kv4/interface.py
+@@ -178,11 +178,14 @@ def _jit_compile_cpp_backend():
+         ],
+         extra_include_paths=extra_include,
+         extra_ldflags=[
++            f'"{os.path.join(tvm_ffi_dir, "lib", "tvm_ffi.lib")}"',
++        ] if os.name == "nt" else [
+             f"-L{os.path.join(tvm_ffi_dir, 'lib')}",
+             "-ltvm_ffi",
+             f"-Wl,-rpath,{os.path.join(tvm_ffi_dir, 'lib')}",
+         ],
+-        extra_cflags=["-std=c++20", "-O2"],
++        extra_cflags=["/std:c++20", "/O2"] if os.name == "nt" else ["-std=c++20", "-O2"],
++        with_cuda=True if os.name == "nt" else None,
+         verbose=True,
+     )
+     logger.info(
+diff --git a/python/fmha_sm100/decode_q8kv4/jit.py b/python/fmha_sm100/decode_q8kv4/jit.py
+index 4a2f162..93ee449 100644
+--- a/python/fmha_sm100/decode_q8kv4/jit.py
++++ b/python/fmha_sm100/decode_q8kv4/jit.py
+@@ -144,6 +144,14 @@ rule nvcc_link
+   description = Linking $out
+ """
+ 
++if os.name == "nt":
++    import tvm_ffi
++
++    _NINJA_RULES = _NINJA_RULES.replace("-MMD", "-MD")
++    _NINJA_RULES = _NINJA_RULES.replace(
++        "-lcuda", f'-lcuda "{Path(tvm_ffi.__file__).parent / "lib" / "tvm_ffi.lib"}"'
++    )
++
+ 
+ def _recipe(name: str, nvcc_flags: str, templates=(), **key) -> _jit_cache.Recipe:
+     """One library's cache recipe (compiler, flags, build rules, ``key``); the files it compiles
+@@ -202,7 +210,7 @@ def _nvcc_flags(dequant_mode: str, arch: str, block_scale_shift: int = 0) -> str
+         "-Xptxas",
+         "-O3",
+         "-Xcompiler",
+-        "-fPIC",
++        "/Zc:preprocessor" if os.name == "nt" else "-fPIC",
+     ]
+     return " ".join(flags)
+ 
+@@ -235,8 +243,11 @@ def _write_ninja(
+ ) -> None:
+     nvcc = _cuda_home() / "bin/nvcc"
+     objects = [cache_dir / f"source_{index}.o" for index in range(len(sources))]
++    def ninja_path(path):
++        return str(path).replace("$", "$$").replace(" ", "$ ").replace(":", "$:")
++
+     builds = "\n".join(
+-        f"build {obj}: nvcc_compile {source}"
++        f"build {ninja_path(obj)}: nvcc_compile {ninja_path(source)}"
+         for obj, source in zip(objects, sources, strict=True)
+     )
+     content = f"""ninja_required_version = 1.5
+@@ -246,7 +257,7 @@ nvcc_flags = {_nvcc_flags(dequant_mode, arch, block_scale_shift)}
+ 
+ {_NINJA_RULES}
+ {builds}
+-build {output}: nvcc_link {" ".join(str(obj) for obj in objects)}
++build {ninja_path(output)}: nvcc_link {" ".join(ninja_path(obj) for obj in objects)}
+ """
+     _write_text_if_changed(cache_dir / "build.ninja", content)
+ 
+diff --git a/python/fmha_sm100/jit.py b/python/fmha_sm100/jit.py
+index c4ecfc4..6c49666 100644
+--- a/python/fmha_sm100/jit.py
++++ b/python/fmha_sm100/jit.py
+@@ -266,7 +266,7 @@ def _get_nvcc_flags(fmha=True, kv_mode=0, fast_math=True, archs=_DEFAULT_ARCHS):
+         # compile from the package, so the cache records the files the compiler really read.
+         f"-I{_FMHA_VARLEN_DIR}",
+         "-DNDEBUG", "-Xptxas", "-O1" if fmha else "-O3",
+-        "-Xcompiler", "-fPIC",
++        "-Xcompiler", "/Zc:preprocessor" if os.name == "nt" else "-fPIC",
+     ]
+     if fast_math:
+         nvcc_flags.append("-use_fast_math")
+@@ -301,6 +301,14 @@ rule nvcc_link
+   description = Linking $out
+ """
+ 
++if os.name == "nt":
++    import tvm_ffi
++
++    _NINJA_RULES = _NINJA_RULES.replace("-MMD", "-MD")
++    _NINJA_RULES = _NINJA_RULES.replace(
++        "-lcuda", f'-lcuda "{Path(tvm_ffi.__file__).parent / "lib" / "tvm_ffi.lib"}"'
++    )
++
+ 
+ def _recipe(name, nvcc_flags, templates=(), **key):
+     """The cache recipe of one library: its name, compiler, flags and build rules, plus ``key``
+@@ -321,7 +329,10 @@ def _build_library(recipe, label, nvcc_flags, sources, jobs=1):
+         logger.info("JIT compiling %s", label)
+         library = build_dir / f"{recipe.name}.so"
+         objects = [(build_dir / f"{Path(source).stem}.o", source) for source in sources(build_dir)]
+-        compiles = "\n".join(f"build {obj}: nvcc_compile {source}" for obj, source in objects)
++        def ninja_path(path):
++            return str(path).replace("$", "$$").replace(" ", "$ ").replace(":", "$:")
++
++        compiles = "\n".join(f"build {ninja_path(obj)}: nvcc_compile {ninja_path(source)}" for obj, source in objects)
+         _jit_cache.write_if_changed(build_dir / "build.ninja", f"""ninja_required_version = 1.5
+ 
+ nvcc = {_nvcc()}
+@@ -329,7 +340,7 @@ nvcc_flags = {nvcc_flags}
+ 
+ {_NINJA_RULES}
+ {compiles}
+-build {library}: nvcc_link {" ".join(str(obj) for obj, _ in objects)}
++build {ninja_path(library)}: nvcc_link {" ".join(ninja_path(obj) for obj, _ in objects)}
+ """)
+         _jit_cache.run_ninja(build_dir, label, jobs=jobs)
+         return library
+diff --git a/python/fmha_sm100/prefill_q8kv4/jit.py b/python/fmha_sm100/prefill_q8kv4/jit.py
+index e19e167..010128e 100644
+--- a/python/fmha_sm100/prefill_q8kv4/jit.py
++++ b/python/fmha_sm100/prefill_q8kv4/jit.py
+@@ -196,7 +196,9 @@ class JitSpec:
+                 # this define CUTLASS compiles griddepcontrol.wait / launch_dependents out.
+                 "-DCUTLASS_ENABLE_GDC_FOR_SM100",
+             ],
+-            "extra_ldflags": ["-lcuda", f"-Wl,-rpath,{_cuda_home() / 'lib64'}"],
++            "extra_ldflags": ["cuda.lib"] if os.name == "nt" else [
++                "-lcuda", f"-Wl,-rpath,{_cuda_home() / 'lib64'}"
++            ],
+         }
+ 
+     def recipe(self) -> _jit_cache.Recipe:
+@@ -234,7 +236,7 @@ class JitSpec:
+ 
+         def builder(cache_dir: Path) -> Path:
+             built["module"] = self._compile(cache_dir)
+-            return cache_dir / f"{self.module_name}.so"
++            return Path(built["module"].__file__)
+ 
+         library = recipe.build(builder)
+         # cpp_extension.load already imported what this process built; a library another
