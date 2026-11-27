@@ -41,6 +41,13 @@ add_custom_target(fmha_sm100)
 
 set(FMHA_SM100_PY_ROOT "${fmha_sm100_SOURCE_DIR}/python/fmha_sm100")
 
+if(WIN32)
+  file(TO_CMAKE_PATH "$ENV{VLLM_CUDA_INCLUDE_OVERLAY}" FMHA_SM100_CUDA_OVERLAY)
+  install(FILES "${FMHA_SM100_CUDA_OVERLAY}/cuda.h"
+    DESTINATION vllm/third_party/fmha_sm100/csrc/include_overlay
+    COMPONENT fmha_sm100)
+endif()
+
 install(FILES
   "${FMHA_SM100_PY_ROOT}/__init__.py"
   "${FMHA_SM100_PY_ROOT}/_jit_cache.py"

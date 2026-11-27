@@ -314,19 +314,24 @@ index 4a2f162..93ee449 100644
      _write_text_if_changed(cache_dir / "build.ninja", content)
  
 diff --git a/python/fmha_sm100/jit.py b/python/fmha_sm100/jit.py
-index c4ecfc4..6c49666 100644
+index c4ecfc4..36ab68b 100644
 --- a/python/fmha_sm100/jit.py
 +++ b/python/fmha_sm100/jit.py
-@@ -266,7 +266,7 @@ def _get_nvcc_flags(fmha=True, kv_mode=0, fast_math=True, archs=_DEFAULT_ARCHS):
+@@ -266,7 +266,12 @@ def _get_nvcc_flags(fmha=True, kv_mode=0, fast_math=True, archs=_DEFAULT_ARCHS):
          # compile from the package, so the cache records the files the compiler really read.
          f"-I{_FMHA_VARLEN_DIR}",
          "-DNDEBUG", "-Xptxas", "-O1" if fmha else "-O3",
 -        "-Xcompiler", "-fPIC",
 +        "-Xcompiler", "/Zc:preprocessor" if os.name == "nt" else "-fPIC",
      ]
++    if os.name == "nt":
++        cuda_overlay = _FMHA_VARLEN_DIR / "include_overlay"
++        if not (cuda_overlay / "cuda.h").is_file():
++            raise RuntimeError("Missing packaged CUDA overlay; rebuild Windows vLLM")
++        nvcc_flags += ["-Xcompiler", "/Zc:__cplusplus", f'-I"{cuda_overlay}"']
      if fast_math:
          nvcc_flags.append("-use_fast_math")
-@@ -301,6 +301,14 @@ rule nvcc_link
+@@ -301,10 +306,18 @@ rule nvcc_link
    description = Linking $out
  """
  
@@ -341,9 +346,15 @@ index c4ecfc4..6c49666 100644
  
  def _recipe(name, nvcc_flags, templates=(), **key):
      """The cache recipe of one library: its name, compiler, flags and build rules, plus ``key``
-@@ -321,7 +329,10 @@ def _build_library(recipe, label, nvcc_flags, sources, jobs=1):
+     (template parameters). File contents are checked separately, per record."""
+     return _jit_cache.Recipe(_namespace(), name, {"nvcc": _nvcc(), "nvcc_flags": nvcc_flags,
+                                                   "rules": _NINJA_RULES, **key},
+                              templates=templates)
+@@ -321,7 +334,11 @@ def _build_library(recipe, label, nvcc_flags, sources, jobs=1):
          logger.info("JIT compiling %s", label)
-         library = build_dir / f"{recipe.name}.so"
+-        library = build_dir / f"{recipe.name}.so"
++        suffix = ".dll" if os.name == "nt" else ".so"
++        library = build_dir / f"{recipe.name}{suffix}"
          objects = [(build_dir / f"{Path(source).stem}.o", source) for source in sources(build_dir)]
 -        compiles = "\n".join(f"build {obj}: nvcc_compile {source}" for obj, source in objects)
 +        def ninja_path(path):
@@ -353,7 +364,7 @@ index c4ecfc4..6c49666 100644
          _jit_cache.write_if_changed(build_dir / "build.ninja", f"""ninja_required_version = 1.5
  
  nvcc = {_nvcc()}
-@@ -329,7 +340,7 @@ nvcc_flags = {nvcc_flags}
+@@ -329,7 +346,7 @@ nvcc_flags = {nvcc_flags}
  
  {_NINJA_RULES}
  {compiles}
