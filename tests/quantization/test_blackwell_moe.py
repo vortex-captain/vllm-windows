@@ -93,6 +93,7 @@ def test_llama4_fp8_tensor_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatc
 
 
 def test_llama4_fp8_tensor_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("CUDA_LOG_FILE", "stderr")
     can_initialize(
         "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
         hf_overrides=HF_OVERRIDE_MM,
