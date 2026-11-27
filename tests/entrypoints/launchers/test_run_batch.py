@@ -1266,7 +1266,9 @@ async def test_open_batch_input_stages_a_stream(
     request.addfinalizer(lambda: os.close(read_fd))
     with os.fdopen(write_fd, "wb") as writer:
         writer.write(payload.encode())
-    if os.name == "nt":  # Windows has no /dev/fd.
+    if os.name == "nt":
+        # Windows has no /dev/fd. Give open() a duplicate it can close
+        # without closing the descriptor owned by the test finalizer.
         open_pipe = partial(open, opener=lambda *_: os.dup(read_fd))
         monkeypatch.setattr(run_batch_module, "open", open_pipe, raising=False)
 

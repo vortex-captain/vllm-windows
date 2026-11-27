@@ -46,6 +46,7 @@ def multimodal_server():
         "--gpu-memory-utilization",
         "0.8",
         "--default-mm-loras",
+        # In hand-built JSON, a Windows path like C:\temp would parse with a tab.
         json.dumps({"audio": AUDIO_LORA_PATH}),
     ]
 

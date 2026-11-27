@@ -404,7 +404,8 @@ async def open_batch_input(
 
         # JSON allows a bare "\r" as whitespace, so split lines on "\n" only.
         source = stack.enter_context(open(path_or_url, encoding="utf-8", newline="\n"))
-        # Windows pipes can report seekable even though they cannot be rewound.
+        # A Windows pipe can accept seek(0) without rewinding. If we don't
+        # stage it, validation consumes the input and dispatch reads nothing.
         if source.seekable() and not (
             sys.platform == "win32" and stat.S_ISFIFO(os.fstat(source.fileno()).st_mode)
         ):
@@ -506,6 +507,7 @@ async def batch_output_writer(
         return
 
     # Windows cannot reopen a delete-on-close file by name for upload.
+    # Enter cleanup first so the file closes before unlink, even if upload fails.
     unlink = sys.platform == "win32" and output_tmp_dir is not None
     with (
         contextlib.ExitStack() as cleanup,
