@@ -360,7 +360,7 @@ def is_url(path_or_url: str) -> bool:
     return urlparse(path_or_url).scheme in ("http", "https")
 
 
-def staging_file(tmp_dir: str | None, prefix: str) -> IO[str]:
+def staging_file(tmp_dir: str | None, prefix: str, *, delete: bool = True) -> IO[str]:
     """In-memory buffer, or a temporary file when a directory is given."""
     if tmp_dir is None:
         return StringIO()
@@ -371,6 +371,7 @@ def staging_file(tmp_dir: str | None, prefix: str) -> IO[str]:
         dir=tmp_dir,
         prefix=prefix,
         suffix=".jsonl",
+        delete=delete,
     )
 
 
@@ -403,7 +404,11 @@ async def open_batch_input(
 
         # JSON allows a bare "\r" as whitespace, so split lines on "\n" only.
         source = stack.enter_context(open(path_or_url, encoding="utf-8", newline="\n"))
-        if source.seekable():
+        # A Windows pipe can accept seek(0) without rewinding. If we don't
+        # stage it, validation consumes the input and dispatch reads nothing.
+        if source.seekable() and not (
+            sys.platform == "win32" and stat.S_ISFIFO(os.fstat(source.fileno()).st_mode)
+        ):
             yield source
             return
 
@@ -501,7 +506,15 @@ async def batch_output_writer(
             yield f
         return
 
-    with staging_file(output_tmp_dir, "tmp_batch_output_") as f:
+    # Windows cannot reopen a delete-on-close file by name for upload.
+    # Enter cleanup first so the file closes before unlink, even if upload fails.
+    unlink = sys.platform == "win32" and output_tmp_dir is not None
+    with (
+        contextlib.ExitStack() as cleanup,
+        staging_file(output_tmp_dir, "tmp_batch_output_", delete=not unlink) as f,
+    ):
+        if unlink:
+            cleanup.callback(os.unlink, f.name)
         yield f
         f.flush()
         logger.info("Uploading outputs to %s", path_or_url)

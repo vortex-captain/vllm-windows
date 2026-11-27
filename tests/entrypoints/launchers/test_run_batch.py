@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Generator
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1146,7 +1147,7 @@ async def test_upload_data_error_includes_awaited_response_body():
 
 def _write_batch(tmp_path, lines: list[str]):
     input_path = tmp_path / "input.jsonl"
-    input_path.write_text("\n".join(lines) + "\n")
+    input_path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return input_path
 
 
@@ -1211,8 +1212,10 @@ def test_is_same_local_file_detects_aliases(tmp_path):
     link.symlink_to(target)
     other = tmp_path / "other.jsonl"
     other.write_text("{}\n")
-    fifo = tmp_path / "fifo"
-    os.mkfifo(fifo)
+    non_regular = os.devnull
+    if hasattr(os, "mkfifo"):
+        non_regular = str(tmp_path / "fifo")
+        os.mkfifo(non_regular)
 
     assert is_same_local_file(str(target), str(target))
     assert is_same_local_file(str(target), str(link))
@@ -1221,7 +1224,7 @@ def test_is_same_local_file_detects_aliases(tmp_path):
     assert not is_same_local_file(str(target), str(other))
     assert not is_same_local_file(str(target), "https://example.com/output.jsonl")
     assert not is_same_local_file(str(target), str(tmp_path / "missing.jsonl"))
-    assert not is_same_local_file(str(fifo), str(fifo))
+    assert not is_same_local_file(non_regular, non_regular)
 
 
 @pytest.mark.asyncio
@@ -1254,12 +1257,20 @@ async def test_open_batch_input_reads_a_regular_file_in_place(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("use_tmp_dir", [False, True])
-async def test_open_batch_input_stages_a_stream(tmp_path, use_tmp_dir):
+async def test_open_batch_input_stages_a_stream(
+    tmp_path, use_tmp_dir, request, monkeypatch
+):
     """A non-seekable input must be staged so the batch can be read twice."""
     payload = '{"custom_id": "request-1"}\n'
     read_fd, write_fd = os.pipe()
-    os.write(write_fd, payload.encode())
-    os.close(write_fd)
+    request.addfinalizer(lambda: os.close(read_fd))
+    with os.fdopen(write_fd, "wb") as writer:
+        writer.write(payload.encode())
+    if os.name == "nt":
+        # Windows has no /dev/fd. Give open() a duplicate it can close
+        # without closing the descriptor owned by the test finalizer.
+        open_pipe = partial(open, opener=lambda *_: os.dup(read_fd))
+        monkeypatch.setattr(run_batch_module, "open", open_pipe, raising=False)
 
     tmp_dir = str(tmp_path) if use_tmp_dir else None
     async with open_batch_input(f"/dev/fd/{read_fd}", tmp_dir) as f:
