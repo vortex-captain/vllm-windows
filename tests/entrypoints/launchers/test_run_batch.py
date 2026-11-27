@@ -1212,6 +1212,10 @@ def test_is_same_local_file_detects_aliases(tmp_path):
     link.symlink_to(target)
     other = tmp_path / "other.jsonl"
     other.write_text("{}\n")
+    non_regular = os.devnull
+    if hasattr(os, "mkfifo"):
+        non_regular = str(tmp_path / "fifo")
+        os.mkfifo(non_regular)
 
     assert is_same_local_file(str(target), str(target))
     assert is_same_local_file(str(target), str(link))
@@ -1220,11 +1224,7 @@ def test_is_same_local_file_detects_aliases(tmp_path):
     assert not is_same_local_file(str(target), str(other))
     assert not is_same_local_file(str(target), "https://example.com/output.jsonl")
     assert not is_same_local_file(str(target), str(tmp_path / "missing.jsonl"))
-    assert not is_same_local_file(os.devnull, os.devnull)
-    if hasattr(os, "mkfifo"):
-        fifo = tmp_path / "fifo"
-        os.mkfifo(fifo)
-        assert not is_same_local_file(str(fifo), str(fifo))
+    assert not is_same_local_file(non_regular, non_regular)
 
 
 @pytest.mark.asyncio
@@ -1257,22 +1257,24 @@ async def test_open_batch_input_reads_a_regular_file_in_place(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("use_tmp_dir", [False, True])
-async def test_open_batch_input_stages_a_stream(tmp_path, monkeypatch, use_tmp_dir):
+async def test_open_batch_input_stages_a_stream(
+    tmp_path, use_tmp_dir, request, monkeypatch
+):
     """A non-seekable input must be staged so the batch can be read twice."""
     payload = '{"custom_id": "request-1"}\n'
     read_fd, write_fd = os.pipe()
-    tmp_dir = str(tmp_path) if use_tmp_dir else None
-    with os.fdopen(read_fd, "rb") as reader:
-        with os.fdopen(write_fd, "wb") as writer:
-            writer.write(payload.encode())
-
-        # Resolve the name to a real pipe without relying on POSIX /dev/fd.
-        open_pipe = partial(open, opener=lambda path, flags: os.dup(reader.fileno()))
+    request.addfinalizer(lambda: os.close(read_fd))
+    with os.fdopen(write_fd, "wb") as writer:
+        writer.write(payload.encode())
+    if os.name == "nt":  # Windows has no /dev/fd.
+        open_pipe = partial(open, opener=lambda *_: os.dup(read_fd))
         monkeypatch.setattr(run_batch_module, "open", open_pipe, raising=False)
-        async with open_batch_input("batch.pipe", tmp_dir) as f:
-            assert _read_twice(f) == (payload, payload)
-            staged_files = list(tmp_path.iterdir())
-            assert bool(staged_files) == use_tmp_dir
+
+    tmp_dir = str(tmp_path) if use_tmp_dir else None
+    async with open_batch_input(f"/dev/fd/{read_fd}", tmp_dir) as f:
+        assert _read_twice(f) == (payload, payload)
+        staged_files = list(tmp_path.iterdir())
+        assert bool(staged_files) == use_tmp_dir
     assert not list(tmp_path.iterdir()), "staged copy must be removed"
 
 
